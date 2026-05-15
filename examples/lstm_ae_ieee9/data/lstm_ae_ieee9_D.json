@@ -1,0 +1,17 @@
+{
+  "size": "D",
+  "hidden": 16,
+  "n_enc_layers": 2,
+  "n_dec_layers": 2,
+  "T": 30,
+  "n_features": 36,
+  "tau": 0.77,
+  "anchor_index": 0,
+  "anchor_score": 0.6605644226074219,
+  "epochs": 100,
+  "batch_size": 32,
+  "lr": 0.001,
+  "final_train_mse": 0.5869949793815613,
+  "final_test_mse": 0.5814273357391357,
+  "n_params": 10596
+}

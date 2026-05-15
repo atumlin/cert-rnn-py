@@ -12,11 +12,8 @@ venv/
 .tox/
 .mypy_cache/
 .ruff_cache/
-*.pt
-*.pth
-*.npz
-*.npy
-examples/**/data/
+# Generated artifacts go in examples/**/results/; data/ holds committed
+# fixtures (small trained checkpoints + anchors needed by the demos).
 examples/**/results/
 examples/**/checkpoints/
 .DS_Store
