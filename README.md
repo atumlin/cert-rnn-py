@@ -15,13 +15,11 @@ reference (NNV-based) into pure Python (numpy + scipy + torch), and
 differs from the original work in that:
 
 - the implementation is pure Python rather than the original codebase;
-- the primary model-input path is PyTorch state-dicts (`.pt`) loaded
-  via `cert_rnn.from_torch` — there is no `.mat` boundary in the
-  engine. (The MNIST-sequence example keeps a `.mat` loader purely to
-  cross-validate against the MATLAB reference numbers; it is not the
-  intended path for new models.)
-- soundness is independently validated here via a fuzz/LP-audit/
-  red-team test suite and MATLAB cross-validation fixtures.
+- the model-input path is PyTorch modules / state-dicts loaded via
+  `cert_rnn.from_torch` — there is no `.mat` boundary in the engine;
+- soundness is independently validated here via a fuzz / LP-audit /
+  red-team test suite and per-transformer MATLAB cross-validation
+  fixtures.
 
 All credit for the underlying method (the sound bilinear and
 sigmoid/tanh zonotope transformers and the Algorithm 1 bisection)
@@ -30,10 +28,10 @@ belongs to the original authors — see [Citation](#citation) below.
 ## Status
 
 Implemented and tested. The zonotope engine, Algorithm 1 verification,
-both end-to-end examples, and the soundness test suite are complete
-(112 passing tests). A red-team audit (`docs/red_team_report.md`) found
-no soundness violations on either shipped pipeline, mathematically or
-empirically. See `docs/soundness.md` for the math + soundness proofs.
+the typed model/spec API, and the soundness test suite are complete. An
+independent red-team audit found no soundness violations, mathematically
+or empirically. See [docs/soundness.md](docs/soundness.md) for the math
+and soundness proofs.
 
 ## Install
 
@@ -65,14 +63,11 @@ src/cert_rnn/    engine + verification + tool surface
                  tool:     models (RNNModel/LSTMAutoencoder), specs
                            (certify + MarginSpec/ThresholdSpec/ReconErrorSpec),
                            cli, runtime
+examples/        verify_my_model.py — copy-me template
+                 demo_lstm_cell.py  — tiny end-to-end walkthrough
 tests/           soundness contract (per-transformer fuzz, LP audit,
                  lstm step, red-team, MATLAB cross-validation, CLI/wrappers)
-examples/        verify_my_model.py — copy-me template
-                 mnist_sequence     — paper Table 2 repro
-                 lstm_ae_ieee9      — IEEE-9 LSTM-AE false-alarm Spec C
-research/        dev red-team / tabulation scripts (back the docs)
-docs/            quickstart.md, api.md, soundness.md,
-                 red_team_report.md, lstm_ae_results.md
+docs/            quickstart.md, api.md, soundness.md
 ```
 
 ## Citation

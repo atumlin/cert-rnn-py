@@ -204,8 +204,8 @@ the worst-correlation case is rare under random sampling, so the
 MATLAB red-team did not catch it. The MATLAB bound is **unsound in the
 adversarial worst case**.
 
-The numerical demonstration is in
-[tests/test_mnist_parity.py::test_perstep_widths_multi_layer_python_at_least_as_loose](../tests/test_mnist_parity.py),
+The numerical demonstration is in the project's MNIST per-step-width
+parity harness (`test_perstep_widths_multi_layer_python_at_least_as_loose`),
 which asserts (a) Python bounds ≥ MATLAB bounds everywhere and (b) Python
 bounds remain sound vs concrete sampling.
 
@@ -270,9 +270,9 @@ Numerical parity vs MATLAB CertRNN:
 - exact `(c, V)` match on 19 fixtures (transformers, lstm_step, rnn_step):
   [tests/test_cross_validation.py](../tests/test_cross_validation.py)
 - per-frame certified ε for the LSTM-AE Spec C anchor, all 30 frames,
-  diff = 0.000e+00: [tests/test_lstm_ae_parity.py](../tests/test_lstm_ae_parity.py)
-- per-sample certified radius on MNIST LSTM-1-32, diff = 0.000e+00:
-  [tests/test_mnist_parity.py](../tests/test_mnist_parity.py)
+  diff = 0.000e+00 (LSTM-AE parity harness)
+- per-sample certified radius on MNIST LSTM-1-32, diff = 0.000e+00
+  (MNIST parity harness)
 - per-timestep bound widths on MNIST LSTM-1-32 (single-layer), float
   noise match; on LSTM-2-32 / 2-64 / 4-32 / 7-32 (stacked), Python ≥
   MATLAB with Python sound on concrete sampling (the Bug 2

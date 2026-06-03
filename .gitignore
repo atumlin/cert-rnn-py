@@ -21,3 +21,15 @@ examples/**/checkpoints/
 # Slides: keep source (.tex, figure scripts) tracked manually if desired,
 # but ignore build artifacts and the compiled deck by default.
 slides/
+
+# Internal / reproduction content — kept locally, not part of the public
+# tool surface (research harnesses, the heavy MATLAB-reproduction examples
+# and their data, internal validation reports, and the parity tests that
+# depend on that data).
+/research/
+/examples/mnist_sequence/
+/examples/lstm_ae_ieee9/
+/docs/red_team_report.md
+/docs/lstm_ae_results.md
+/tests/test_lstm_ae_parity.py
+/tests/test_mnist_parity.py
