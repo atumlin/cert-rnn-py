@@ -84,6 +84,7 @@ PyTorch interop. Rejects bidirectional, dropout>0, and ReLU-RNN.
 | --- | --- |
 | [`lstm_to_model_dict(rec, fc=None)`](../src/cert_rnn/from_torch.py) | Extract `nn.LSTM` (any `num_layers`) or `nn.LSTMCell`. Optional `nn.Linear` classifier head. |
 | [`rnn_to_model_dict(rec, fc=None)`](../src/cert_rnn/from_torch.py) | Extract `nn.RNN(nonlinearity='tanh')`. |
+| [`lstm_ae_to_model_dicts(encoder, decoder, head)`](../src/cert_rnn/from_torch.py) | Extract an LSTM autoencoder. `encoder`/`decoder` may each be an `nn.LSTM`, `nn.LSTMCell`, or a sequence of `nn.LSTMCell` (a stacked ModuleList); `head` is `nn.Linear` back to input space. Returns `{"encoder", "decoder", "head", "H", "D"}`. |
 
 Both return a model dict directly consumable by `cert_rnn.lstm.lstm_step_stack` / `cert_rnn.rnn.rnn_step`:
 
@@ -96,6 +97,35 @@ Both return a model dict directly consumable by `cert_rnn.lstm.lstm_step_stack` 
     "gate_order": "ifgo",            # LSTM only
     "nonlinearity": "tanh",          # RNN only
 }
+```
+
+## `cert_rnn.models`
+
+Typed, ergonomic wrappers over the model dicts. Thin handles: they carry
+the underlying dict(s) verbatim (`.as_dict()`, `.encoder`, ...) and expose
+verification as methods, so a copying user never threads `encoder, decoder,
+head` positionally or memorizes dict keys. Everything that takes a dict
+keeps working — the wrappers are additive.
+
+| Symbol | What |
+| --- | --- |
+| [`RNNModel.from_torch(rec, fc=None)`](../src/cert_rnn/models.py) | Wrap an `nn.LSTM`/`nn.LSTMCell`/`nn.RNN` (+ optional `nn.Linear` head). Properties `D, H, L, type, has_head`. |
+| `RNNModel.reach(x_seq, eps, ...)` | Per-timestep top-layer hidden zono list (LSTM). |
+| `RNNModel.certifies_margin(x_seq, eps, true_class, ...)` | Spec A boolean at a fixed `eps`. |
+| `RNNModel.certify_radius(x_seq, true_class, ...)` | Algorithm 1 radius for Spec A. Returns `(min_over_frames, per_frame_array)`. |
+| [`LSTMAutoencoder.from_torch(encoder, decoder, head)`](../src/cert_rnn/models.py) | Wrap an LSTM-AE via `lstm_ae_to_model_dicts`. Properties `H, D`. |
+| `LSTMAutoencoder.score_ub(x_anchor, eps, ...)` | Sound recon-score upper bound over the eps-ball. |
+| `LSTMAutoencoder.certifies(x_anchor, eps, tau, ...)` | Spec C boolean at a fixed `eps`. |
+| `LSTMAutoencoder.certify_radius(x_anchor, tau, ...)` | Algorithm 1 radius for Spec C. |
+
+```python
+from cert_rnn import RNNModel, LSTMAutoencoder
+
+clf = RNNModel.from_torch(my_lstm, my_fc)
+radius, per_frame = clf.certify_radius(x_seq, true_class=3)
+
+ae = LSTMAutoencoder.from_torch(encoder, decoder, head)
+radius, per_frame = ae.certify_radius(x_anchor, tau=0.02)
 ```
 
 ## `cert_rnn.verify`

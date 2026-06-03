@@ -19,7 +19,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from cert_rnn.from_torch import lstm_to_model_dict
+from cert_rnn import LSTMAutoencoder
 
 DATA_DIR = Path(__file__).parent / "data"
 VALID_SIZES = ("S", "M", "L", "D")
@@ -35,12 +35,12 @@ def _cell_from_state(sd: dict, prefix: str, in_size: int, H: int) -> nn.LSTMCell
     return cell
 
 
-def _head_from_state(sd: dict, H: int, D: int) -> dict:
-    W = sd["head.weight"].detach().cpu().numpy().astype(np.float64)
-    b = sd["head.bias"].detach().cpu().numpy().astype(np.float64)
-    if W.shape != (D, H):
-        raise RuntimeError(f"head.weight shape {W.shape}, expected {(D, H)}")
-    return {"W": W, "b": b}
+def _head_from_state(sd: dict, H: int, D: int) -> nn.Linear:
+    head = nn.Linear(H, D).double()
+    with torch.no_grad():
+        head.weight.copy_(sd["head.weight"].double())
+        head.bias.copy_(sd["head.bias"].double())
+    return head
 
 
 def load_lstm_ae(size: str, data_dir: Path | None = None) -> dict:
@@ -49,6 +49,7 @@ def load_lstm_ae(size: str, data_dir: Path | None = None) -> dict:
     Returns:
         {
             "size":         str,
+            "model":        cert_rnn.LSTMAutoencoder,
             "encoder":      cert_rnn model dict,
             "decoder":      cert_rnn model dict,
             "head":         {"W": (D, H), "b": (D,)},
@@ -70,27 +71,18 @@ def load_lstm_ae(size: str, data_dir: Path | None = None) -> dict:
     n_enc = int(meta["n_enc_layers"])
     n_dec = int(meta["n_dec_layers"])
 
-    def stack_dict(prefix: str, n_layers: int, first_in_size: int) -> dict:
-        layers = []
-        for i in range(n_layers):
-            in_size = first_in_size if i == 0 else H
-            W_in = sd[f"{prefix}.{i}.weight_ih"].detach().cpu().numpy().astype(np.float64)
-            W_rec = sd[f"{prefix}.{i}.weight_hh"].detach().cpu().numpy().astype(np.float64)
-            b_ih = sd[f"{prefix}.{i}.bias_ih"].detach().cpu().numpy().astype(np.float64)
-            b_hh = sd[f"{prefix}.{i}.bias_hh"].detach().cpu().numpy().astype(np.float64)
-            if W_in.shape != (4 * H, in_size):
-                raise RuntimeError(
-                    f"{prefix}.{i}.weight_ih shape {W_in.shape}, expected {(4 * H, in_size)}"
-                )
-            layers.append({"W_in": W_in, "W_rec": W_rec, "b": b_ih + b_hh})
-        return {
-            "type": "lstm", "gate_order": "ifgo",
-            "D": first_in_size, "H": H, "L": n_layers, "layers": layers,
-        }
-
-    encoder = stack_dict("enc_cells", n_enc, D)
-    decoder = stack_dict("dec_cells", n_dec, H)
-    head = _head_from_state(sd, H, D)
+    # Reconstruct the PyTorch cells/head from the flat state dict and let
+    # the library extract the Cert-RNN dicts -- the encoder/decoder are
+    # ModuleList stacks of LSTMCells (cell i feeds cell i+1).
+    enc_cells = [
+        _cell_from_state(sd, f"enc_cells.{i}", D if i == 0 else H, H)
+        for i in range(n_enc)
+    ]
+    dec_cells = [
+        _cell_from_state(sd, f"dec_cells.{i}", H, H) for i in range(n_dec)
+    ]
+    ae = LSTMAutoencoder.from_torch(enc_cells, dec_cells, _head_from_state(sd, H, D))
+    encoder, decoder, head = ae.encoder, ae.decoder, ae.head
 
     anchor = np.load(root / f"anchor_{size}.npy").astype(np.float64)
     if anchor.shape != (T, D):
@@ -100,6 +92,7 @@ def load_lstm_ae(size: str, data_dir: Path | None = None) -> dict:
 
     return {
         "size": size,
+        "model": ae,
         "encoder": encoder,
         "decoder": decoder,
         "head": head,

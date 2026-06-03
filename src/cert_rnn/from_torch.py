@@ -32,6 +32,8 @@ Returned model dict (consumed by cert_rnn.lstm.lstm_step_stack):
 
 from __future__ import annotations
 
+from typing import Sequence
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -120,6 +122,99 @@ def lstm_to_model_dict(
     if head is not None:
         out["head"] = head
     return out
+
+
+def _extract_lstm_stack(
+    rec: "nn.LSTM | nn.LSTMCell | Sequence[nn.LSTMCell]",
+    name: str,
+) -> dict:
+    """Extract a head-less LSTM-stack model dict from a single nn.LSTM /
+    nn.LSTMCell, or a sequence of nn.LSTMCell (a ModuleList-style stack
+    where cell i feeds cell i+1).
+
+    The sequence form covers autoencoders whose encoder/decoder are built
+    as a list of cells rather than a monolithic nn.LSTM.
+    """
+    if isinstance(rec, (nn.LSTM, nn.LSTMCell)):
+        out = lstm_to_model_dict(rec)
+        out.pop("head", None)
+        return out
+    try:
+        cells = list(rec)
+    except TypeError:
+        raise TypeError(
+            f"{name} must be nn.LSTM, nn.LSTMCell, or a sequence of "
+            f"nn.LSTMCell, got {type(rec).__name__}"
+        )
+    if not cells or not all(isinstance(c, nn.LSTMCell) for c in cells):
+        raise TypeError(
+            f"{name} sequence must be a non-empty list of nn.LSTMCell"
+        )
+    H = cells[0].hidden_size
+    D = cells[0].input_size
+    layers = []
+    for i, c in enumerate(cells):
+        if c.hidden_size != H:
+            raise ValueError(
+                f"{name} cell {i}: hidden_size {c.hidden_size} != {H}; "
+                "all stacked cells must share hidden size"
+            )
+        expected_in = D if i == 0 else H
+        if c.input_size != expected_in:
+            raise ValueError(
+                f"{name} cell {i}: input_size {c.input_size} != expected "
+                f"{expected_in} (cell i reads cell i-1's hidden state)"
+            )
+        layers.append(lstm_to_model_dict(c)["layers"][0])
+    return {
+        "type": "lstm",
+        "gate_order": "ifgo",
+        "D": int(D),
+        "H": int(H),
+        "L": len(layers),
+        "layers": layers,
+    }
+
+
+def lstm_ae_to_model_dicts(
+    encoder: "nn.LSTM | nn.LSTMCell | Sequence[nn.LSTMCell]",
+    decoder: "nn.LSTM | nn.LSTMCell | Sequence[nn.LSTMCell]",
+    head: nn.Linear,
+) -> dict:
+    """Extract the three Cert-RNN dicts (encoder, decoder, head) for an
+    LSTM autoencoder from PyTorch modules.
+
+    Assumes the Spec-C autoencoder topology used by cert_rnn.verify:
+    the decoder reads the encoder's final top-layer hidden state (the
+    latent, dim H) at every timestep, and a per-step linear head maps the
+    decoder's top hidden state (dim H_dec) back to the input space (dim D).
+
+    Returns {"encoder", "decoder", "head", "H", "D"} where encoder/decoder
+    are head-less stack dicts and head is {"W": (D, H_dec), "b": (D,)}.
+    Consumable directly by cert_rnn.verify.lstm_ae_reach / spec_c_holds.
+    """
+    enc = _extract_lstm_stack(encoder, "encoder")
+    dec = _extract_lstm_stack(decoder, "decoder")
+    if not isinstance(head, nn.Linear):
+        raise TypeError(f"head must be nn.Linear, got {type(head).__name__}")
+    head_d = _fc_dict(head)
+    H, D = enc["H"], enc["D"]
+    if dec["D"] != H:
+        raise ValueError(
+            f"decoder input size {dec['D']} must equal encoder hidden H={H} "
+            "(the decoder reads the latent at every step)"
+        )
+    if head_d["W"].shape[1] != dec["H"]:
+        raise ValueError(
+            f"head in_features {head_d['W'].shape[1]} must equal decoder "
+            f"hidden size {dec['H']}"
+        )
+    if head_d["W"].shape[0] != D:
+        raise ValueError(
+            f"head out_features {head_d['W'].shape[0]} must equal encoder "
+            f"input dim D={D} (reconstruction is in input space)"
+        )
+    return {"encoder": enc, "decoder": dec, "head": head_d, "H": int(H), "D": int(D)}
 
 
 def rnn_to_model_dict(rec: nn.RNN, fc: nn.Linear | None = None) -> dict:

@@ -14,8 +14,13 @@ Layers, lowest to highest:
 """
 
 from cert_rnn.audit import lp_feasible
-from cert_rnn.from_torch import lstm_to_model_dict, rnn_to_model_dict
+from cert_rnn.from_torch import (
+    lstm_ae_to_model_dicts,
+    lstm_to_model_dict,
+    rnn_to_model_dict,
+)
 from cert_rnn.lstm import lstm_state_init, lstm_step, lstm_step_stack
+from cert_rnn.models import LSTMAutoencoder, RNNModel
 from cert_rnn.rnn import rnn_step
 from cert_rnn.transformers import (
     bilinear_sigmoid_identity,
@@ -64,8 +69,12 @@ __all__ = [
     "lstm_step_stack",
     "rnn_step",
     # PyTorch interop
+    "lstm_ae_to_model_dicts",
     "lstm_to_model_dict",
     "rnn_to_model_dict",
+    # typed model wrappers
+    "LSTMAutoencoder",
+    "RNNModel",
     # verification
     "ThreatModel",
     "bisect_epsilon",
