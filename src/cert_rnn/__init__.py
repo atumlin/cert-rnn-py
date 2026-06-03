@@ -21,7 +21,16 @@ from cert_rnn.from_torch import (
 )
 from cert_rnn.lstm import lstm_state_init, lstm_step, lstm_step_stack
 from cert_rnn.models import LSTMAutoencoder, RNNModel
+from cert_rnn.specs import (
+    CertResult,
+    MarginSpec,
+    ReconErrorSpec,
+    Spec,
+    ThresholdSpec,
+    certify,
+)
 from cert_rnn.rnn import rnn_step
+from cert_rnn.runtime import limit_blas_threads, pin_blas_threads
 from cert_rnn.transformers import (
     bilinear_sigmoid_identity,
     bilinear_sigmoid_tanh,
@@ -75,6 +84,16 @@ __all__ = [
     # typed model wrappers
     "LSTMAutoencoder",
     "RNNModel",
+    # property specs + unified entry point
+    "Spec",
+    "MarginSpec",
+    "ThresholdSpec",
+    "ReconErrorSpec",
+    "CertResult",
+    "certify",
+    # runtime
+    "pin_blas_threads",
+    "limit_blas_threads",
     # verification
     "ThreatModel",
     "bisect_epsilon",

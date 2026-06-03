@@ -128,6 +128,34 @@ ae = LSTMAutoencoder.from_torch(encoder, decoder, head)
 radius, per_frame = ae.certify_radius(x_anchor, tau=0.02)
 ```
 
+## `cert_rnn.specs`
+
+Property specs + the unified entry point. A spec answers "does the
+property hold over this abstract output?"; `certify` bisects epsilon. See
+[quickstart.md](quickstart.md).
+
+| Symbol | What |
+| --- | --- |
+| [`certify(model, x, spec, *, threat_model, eps_init, n_iters)`](../src/cert_rnn/specs.py) | Algorithm 1 over any model wrapper + spec. Returns a `CertResult`. Also available as `model.certify(x, spec, ...)`. |
+| [`MarginSpec(true_class)`](../src/cert_rnn/specs.py) | Classifier argmax preserved (on a logits `Zono`). |
+| [`ThresholdSpec(upper=None, lower=None, indices=None)`](../src/cert_rnn/specs.py) | Output box bound; scalars or per-element arrays; optional dim subset. |
+| [`ReconErrorSpec(tau)`](../src/cert_rnn/specs.py) | Autoencoder reconstruction score ≤ τ (on a `(z_x_hat_seq, z_x_seq)` tuple). |
+| [`Spec`](../src/cert_rnn/specs.py) | Protocol: anything with a sound `holds(output) -> bool`. |
+| [`CertResult`](../src/cert_rnn/specs.py) | `radius`, `per_frame`, `certified`, `threat_model`, `spec`. |
+
+## `cert_rnn.runtime`
+
+| Symbol | What |
+| --- | --- |
+| [`pin_blas_threads(n=1)`](../src/cert_rnn/runtime.py) | Set BLAS thread env vars (full effect requires calling before numpy import). |
+| [`limit_blas_threads(n=1)`](../src/cert_rnn/runtime.py) | Context manager; clamps live pools via threadpoolctl when installed. |
+
+## `cert-rnn` (CLI)
+
+`cert-rnn {version,demo,info,verify}`. `info` lists a checkpoint's
+tensors/shapes; `verify` certifies a pickled `nn.Module` classifier. See
+[quickstart.md](quickstart.md#command-line).
+
 ## `cert_rnn.verify`
 
 Algorithm 1 bisection, reach-set computation, and the two specs.

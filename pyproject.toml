@@ -28,6 +28,9 @@ dev = [
     "pytest-xdist>=3.5",
 ]
 
+[project.scripts]
+cert-rnn = "cert_rnn.cli:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 

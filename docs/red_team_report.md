@@ -357,7 +357,7 @@ None observed.
    the two threat models is mitigated but not eliminated.
 
 5. **Reproducing this report.** Both empirical scripts live in
-   [scripts/](../scripts/): `red_team_mnist.py` (~2 min wall time)
+   [research/](../research/): `red_team_mnist.py` (~2 min wall time)
    and `red_team_lstm_ae.py` (~30 s wall time). Re-run with the
    shipped checkpoints to regenerate the numbers.
 
@@ -367,8 +367,8 @@ None observed.
 
 | Path | What |
 | --- | --- |
-| `scripts/red_team_mnist.py` | MNIST adversarial sampler + PGD. |
-| `scripts/red_team_lstm_ae.py` | LSTM-AE adversarial sampler + PGD. |
+| `research/red_team_mnist.py` | MNIST adversarial sampler + PGD. |
+| `research/red_team_lstm_ae.py` | LSTM-AE adversarial sampler + PGD. |
 | `docs/soundness.md` | Underlying math: zonotope domain, transformers, predicate identity, the two MATLAB aliasing bugs this port fixes. |
 | `tests/test_transformers.py` | LP-feasibility audit (200+ samples per transformer). |
 | `tests/test_lstm_step.py` | LP-feasibility audit at the composition level. |

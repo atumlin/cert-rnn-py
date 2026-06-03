@@ -184,15 +184,15 @@ OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 \
 
 # Plain text or markdown table comparing against
 # examples/lstm_ae_ieee9/matlab_results/certrnn_lstm_ae_*.mat
-python scripts/tabulate_lstm_ae.py            # plain
-python scripts/tabulate_lstm_ae.py --md       # markdown
+python research/tabulate_lstm_ae.py            # plain
+python research/tabulate_lstm_ae.py --md       # markdown
 
 # Adversarial probe of MATLAB's D cert
-python scripts/probe_D_cert_unsoundness.py
+python research/probe_D_cert_unsoundness.py
 ```
 
 MATLAB reference results live in
 `examples/lstm_ae_ieee9/matlab_results/certrnn_lstm_ae_{S,M,L,D}.mat`
 and were produced by
-`nnv3-cert-rnn/code/nnv/examples/Submission/CertRNN/scripts/verify_certrnn_lstm_ae.m`
+`nnv3-cert-rnn/code/nnv/examples/Submission/CertRNN/research/verify_certrnn_lstm_ae.m`
 on the same checkpoints.

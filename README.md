@@ -40,19 +40,39 @@ empirically. See `docs/soundness.md` for the math + soundness proofs.
 ```bash
 pip install -e .[dev]
 pytest
+cert-rnn demo     # tiny end-to-end certification, no data needed
 ```
+
+## Quickstart
+
+```python
+from cert_rnn import RNNModel, MarginSpec
+
+model = RNNModel.from_torch(my_lstm, my_fc)
+result = model.certify(x_seq, MarginSpec(true_class=3))
+print(result.radius)        # largest certified L_inf radius
+```
+
+See [docs/quickstart.md](docs/quickstart.md) for autoencoders, custom
+properties, threat models, and the `cert-rnn` CLI.
 
 ## Layout
 
 ```
-src/cert_rnn/    engine + verification
-                 (zono, transformers, verify, lstm, rnn, from_torch, audit)
+src/cert_rnn/    engine + verification + tool surface
+                 engine:   zono, transformers, verify, lstm, rnn, audit
+                 interop:  from_torch (incl. LSTM-AE extractor)
+                 tool:     models (RNNModel/LSTMAutoencoder), specs
+                           (certify + MarginSpec/ThresholdSpec/ReconErrorSpec),
+                           cli, runtime
 tests/           soundness contract (per-transformer fuzz, LP audit,
-                 lstm step, red-team, MATLAB cross-validation)
-examples/        mnist_sequence  — paper Table 2 repro
-                 lstm_ae_ieee9   — IEEE-9 LSTM-AE false-alarm Spec C
-docs/            soundness.md, api.md, red_team_report.md,
-                 lstm_ae_results.md
+                 lstm step, red-team, MATLAB cross-validation, CLI/wrappers)
+examples/        verify_my_model.py — copy-me template
+                 mnist_sequence     — paper Table 2 repro
+                 lstm_ae_ieee9      — IEEE-9 LSTM-AE false-alarm Spec C
+research/        dev red-team / tabulation scripts (back the docs)
+docs/            quickstart.md, api.md, soundness.md,
+                 red_team_report.md, lstm_ae_results.md
 ```
 
 ## Citation

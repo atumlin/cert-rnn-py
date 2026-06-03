@@ -102,6 +102,27 @@ class RNNModel:
         self._require_lstm("reach")
         return lstm_reach(self.spec, x_seq, eps, threat_model, t_pert)
 
+    def reach_output(
+        self,
+        x_seq: np.ndarray,
+        eps: float,
+        threat_model: ThreatModel = "single_frame",
+        t_pert: int | None = None,
+    ):
+        """Final-step output zonotope used by specs: post-head logits if a
+        classifier head is present, else the final top-layer hidden zono."""
+        z_top = self.reach(x_seq, eps, threat_model, t_pert)[-1]
+        if self.has_head:
+            return z_top.affine_map(self.spec["head"]["W"], self.spec["head"]["b"])
+        return z_top
+
+    def certify(self, x: np.ndarray, spec, **kwargs):
+        """Certify any Spec on this model via Algorithm 1. See
+        cert_rnn.certify."""
+        from cert_rnn.specs import certify as _certify
+
+        return _certify(self, x, spec, **kwargs)
+
     def certifies_margin(
         self,
         x_seq: np.ndarray,
@@ -165,6 +186,23 @@ class LSTMAutoencoder:
         return lstm_ae_reach(
             self.encoder, self.decoder, self.head, x_anchor, eps, threat_model, t_pert
         )
+
+    def reach_output(
+        self,
+        x_anchor: np.ndarray,
+        eps: float,
+        threat_model: ThreatModel = "single_frame",
+        t_pert: int | None = None,
+    ):
+        """Spec-facing reach output: the (z_x_hat_seq, z_x_seq) pair."""
+        return self.reach(x_anchor, eps, threat_model, t_pert)
+
+    def certify(self, x: np.ndarray, spec, **kwargs):
+        """Certify any Spec on this autoencoder via Algorithm 1. See
+        cert_rnn.certify."""
+        from cert_rnn.specs import certify as _certify
+
+        return _certify(self, x, spec, **kwargs)
 
     def score_ub(
         self,
