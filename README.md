@@ -15,8 +15,11 @@ reference (NNV-based) into pure Python (numpy + scipy + torch), and
 differs from the original work in that:
 
 - the implementation is pure Python rather than the original codebase;
-- model input is via PyTorch state-dicts — there is no `.mat`
-  boundary;
+- the primary model-input path is PyTorch state-dicts (`.pt`) loaded
+  via `cert_rnn.from_torch` — there is no `.mat` boundary in the
+  engine. (The MNIST-sequence example keeps a `.mat` loader purely to
+  cross-validate against the MATLAB reference numbers; it is not the
+  intended path for new models.)
 - soundness is independently validated here via a fuzz/LP-audit/
   red-team test suite and MATLAB cross-validation fixtures.
 

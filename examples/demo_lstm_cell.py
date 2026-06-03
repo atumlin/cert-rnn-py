@@ -29,10 +29,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from cert_rnn import Zono
-from cert_rnn.from_torch import lstm_to_model_dict
-from cert_rnn.lstm import lstm_state_init, lstm_step_stack
-from cert_rnn.verify import bisect_epsilon, lstm_reach
+from cert_rnn import certify_radius_spec_a, lstm_reach, lstm_to_model_dict
 
 
 # ----- 1. Build a tiny LSTM ---------------------------------------------------
@@ -87,33 +84,19 @@ print(f"max |cert - pytorch|: {float(np.max(np.abs(cert_logits - logits))):.2e}"
 
 
 # ----- 5. Algorithm 1 bisection: max eps that preserves the prediction --------
-
-def certifies(eps: float, t_pert: int) -> bool:
-    """True iff the cert bound proves the predicted class margin
-    over [logit[true_class] - logit[c]] is positive for every c != true_class
-    over the eps-ball perturbing only frame t_pert."""
-    z_h_top_seq = lstm_reach(model, x_seq, eps, "single_frame", t_pert)
-    z_logits = z_h_top_seq[-1].affine_map(model["head"]["W"], model["head"]["b"])
-    # Build the (C-1, C) margin matrix.
-    others = [c for c in range(C) if c != true_class]
-    diffs = np.zeros((len(others), C))
-    for i, c in enumerate(others):
-        diffs[i, true_class] = 1.0
-        diffs[i, c] = -1.0
-    lb, _ = z_logits.affine_map(diffs).get_ranges()
-    return bool(np.all(lb > 0))
+# certify_radius_spec_a runs Du et al. Algorithm 1 per frame for the
+# classifier-margin spec (logit[true_class] provably dominates every other
+# logit over the eps-ball) and returns (min-over-frames, per-frame array).
+# The margin-matrix construction and bisection live in cert_rnn.verify --
+# no need to hand-roll them here.
 
 print("\nBisecting epsilon per frame (Algorithm 1, single-frame perturbation):")
-eps_per_frame = np.zeros(T)
+cert_radius, eps_per_frame = certify_radius_spec_a(
+    model, x_seq, true_class, eps_init=0.5, n_iters=12, threat_model="single_frame"
+)
 for t in range(T):
-    eps_per_frame[t] = bisect_epsilon(
-        lambda eps, _t=t: certifies(eps, _t),
-        eps_init=0.5,
-        n_iters=12,
-    )
     print(f"  frame {t}: certified eps = {eps_per_frame[t]:.4f}")
 
-cert_radius = float(eps_per_frame.min())
 print(f"\nCertified single-frame radius (min over T): {cert_radius:.4f}")
 
 

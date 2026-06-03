@@ -53,6 +53,12 @@ def _precompute_states(model: dict, x_seq: np.ndarray) -> tuple[list, list]:
     return h_states, c_states
 
 
+# NOTE: cert_rnn.certify_radius_spec_a is the high-level entry point for this
+# exact spec (classifier margin, Algorithm 1, min over frames) -- see
+# examples/demo_lstm_cell.py for the one-call usage. This harness keeps its
+# own forward below only to reuse the precomputed unperturbed prefix states
+# (h_init/c_init), which mirrors the MATLAB cert_radius_singleframe timing
+# optimization being reproduced here. Use the high-level API for new code.
 def _certifies(
     model: dict,
     x_seq: np.ndarray,

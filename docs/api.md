@@ -4,9 +4,17 @@ Quick map of the `cert_rnn` package. For semantics and proofs see
 [docs/soundness.md](soundness.md). For a complete end-to-end example
 see [examples/demo_lstm_cell.py](../examples/demo_lstm_cell.py).
 
-Every symbol below is importable from its module. The package
-top-level (`from cert_rnn import ...`) re-exports the most common
-zonotope primitives only.
+Every symbol below is importable from its module, and the full
+user-facing API is also re-exported at the package top level, so the
+common path is a single import:
+
+```python
+from cert_rnn import lstm_to_model_dict, certify_radius_spec_a
+```
+
+The only public symbols *not* re-exported at the top level are the
+lower-level per-element transformers' unsound baseline
+(`hadamard_affine_only`, kept as a regression target only).
 
 ## `cert_rnn` (top-level)
 
