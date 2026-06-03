@@ -17,3 +17,7 @@ venv/
 examples/**/results/
 examples/**/checkpoints/
 .DS_Store
+
+# Slides: keep source (.tex, figure scripts) tracked manually if desired,
+# but ignore build artifacts and the compiled deck by default.
+slides/

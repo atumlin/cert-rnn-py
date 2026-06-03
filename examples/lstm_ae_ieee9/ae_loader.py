@@ -67,17 +67,30 @@ def load_lstm_ae(size: str, data_dir: Path | None = None) -> dict:
     H = int(meta["hidden"])
     T = int(meta["T"])
     D = int(meta["n_features"])
-    if meta["n_enc_layers"] != 1 or meta["n_dec_layers"] != 1:
-        raise NotImplementedError(
-            "loader currently supports single-layer enc/dec only (the four shipped models)"
-        )
+    n_enc = int(meta["n_enc_layers"])
+    n_dec = int(meta["n_dec_layers"])
 
-    enc_cell = _cell_from_state(sd, "enc_cells.0", D, H)
-    dec_cell = _cell_from_state(sd, "dec_cells.0", H, H)
+    def stack_dict(prefix: str, n_layers: int, first_in_size: int) -> dict:
+        layers = []
+        for i in range(n_layers):
+            in_size = first_in_size if i == 0 else H
+            W_in = sd[f"{prefix}.{i}.weight_ih"].detach().cpu().numpy().astype(np.float64)
+            W_rec = sd[f"{prefix}.{i}.weight_hh"].detach().cpu().numpy().astype(np.float64)
+            b_ih = sd[f"{prefix}.{i}.bias_ih"].detach().cpu().numpy().astype(np.float64)
+            b_hh = sd[f"{prefix}.{i}.bias_hh"].detach().cpu().numpy().astype(np.float64)
+            if W_in.shape != (4 * H, in_size):
+                raise RuntimeError(
+                    f"{prefix}.{i}.weight_ih shape {W_in.shape}, expected {(4 * H, in_size)}"
+                )
+            layers.append({"W_in": W_in, "W_rec": W_rec, "b": b_ih + b_hh})
+        return {
+            "type": "lstm", "gate_order": "ifgo",
+            "D": first_in_size, "H": H, "L": n_layers, "layers": layers,
+        }
+
+    encoder = stack_dict("enc_cells", n_enc, D)
+    decoder = stack_dict("dec_cells", n_dec, H)
     head = _head_from_state(sd, H, D)
-
-    encoder = lstm_to_model_dict(enc_cell)
-    decoder = lstm_to_model_dict(dec_cell)
 
     anchor = np.load(root / f"anchor_{size}.npy").astype(np.float64)
     if anchor.shape != (T, D):

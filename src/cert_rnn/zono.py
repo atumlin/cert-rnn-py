@@ -51,32 +51,78 @@ def reset_pred_allocator(start: int = 0) -> None:
     _DEFAULT_ALLOC = PredAllocator(start)
 
 
+_EMPTY_PID_ARR = np.empty(0, dtype=np.int64)
+
+
+def _is_sorted(a: np.ndarray) -> bool:
+    """Return True iff `a` is monotonically non-decreasing. O(K)."""
+    if a.size <= 1:
+        return True
+    return bool(np.all(a[:-1] <= a[1:]))
+
+
 @dataclass(frozen=True)
 class Zono:
-    """Zonotope { c + V @ alpha : alpha in [-1, 1]^p }, preds named by pred_ids."""
+    """Zonotope { c + V @ alpha : alpha in [-1, 1]^p }, preds named by pred_ids.
+
+    Internal invariant: pred_ids is sorted ascending; V columns are
+    permuted in __post_init__ to match. align_pred_space uses np.union1d
+    + np.searchsorted on the sorted representation for fast composition.
+    """
 
     c: np.ndarray   # (K,) float64
     V: np.ndarray   # (K, p) float64; p may be 0
-    pred_ids: tuple  # length p; each element a unique hashable id (typ. int)
+    pred_ids: tuple  # length p; unique hashable ids; held in sorted ascending order
 
     def __post_init__(self) -> None:
-        c = np.ascontiguousarray(self.c, dtype=np.float64).reshape(-1)
+        c = self.c
+        if not (isinstance(c, np.ndarray) and c.dtype == np.float64
+                and c.ndim == 1 and c.flags.c_contiguous):
+            c = np.ascontiguousarray(c, dtype=np.float64).reshape(-1)
         K = c.shape[0]
-        V = np.ascontiguousarray(self.V, dtype=np.float64)
+
+        V = self.V
+        if not (isinstance(V, np.ndarray) and V.dtype == np.float64):
+            V = np.ascontiguousarray(V, dtype=np.float64)
         if V.ndim == 1:
             V = V.reshape(K, -1)
         if V.shape[0] != K:
             raise ValueError(f"Zono: V row count {V.shape[0]} != len(c) {K}")
-        pred_ids = tuple(self.pred_ids)
-        if len(pred_ids) != V.shape[1]:
+
+        pred_ids = self.pred_ids
+        if not isinstance(pred_ids, tuple):
+            pred_ids = tuple(pred_ids)
+        p = V.shape[1]
+        if len(pred_ids) != p:
             raise ValueError(
-                f"Zono: len(pred_ids) {len(pred_ids)} != V cols {V.shape[1]}"
+                f"Zono: len(pred_ids) {len(pred_ids)} != V cols {p}"
             )
-        if len(set(pred_ids)) != len(pred_ids):
-            raise ValueError("Zono: pred_ids must be unique within a single zono")
+
+        # Combined sorted + unique check in one O(p) numpy pass, skipping
+        # the Python set() and the duplicate np.asarray of the original code.
+        if p == 0:
+            pid_arr_sorted = _EMPTY_PID_ARR
+        elif p == 1:
+            pid_arr_sorted = np.array([pred_ids[0]], dtype=np.int64)
+        else:
+            pid_arr = np.fromiter(pred_ids, dtype=np.int64, count=p)
+            diffs = pid_arr[1:] - pid_arr[:-1]
+            if np.all(diffs > 0):
+                pid_arr_sorted = pid_arr
+            else:
+                perm = np.argsort(pid_arr, kind="stable")
+                pid_arr_sorted = pid_arr[perm]
+                if (pid_arr_sorted[1:] - pid_arr_sorted[:-1] == 0).any():
+                    raise ValueError(
+                        "Zono: pred_ids must be unique within a single zono"
+                    )
+                pred_ids = tuple(pid_arr_sorted.tolist())
+                V = np.ascontiguousarray(V[:, perm])
+
         object.__setattr__(self, "c", c)
         object.__setattr__(self, "V", V)
         object.__setattr__(self, "pred_ids", pred_ids)
+        object.__setattr__(self, "_pid_arr", pid_arr_sorted)
 
     # --- factories ---
 
@@ -146,22 +192,25 @@ def align_pred_space(*zonos: Zono) -> tuple[tuple, list[np.ndarray]]:
         V_emb_i: ndarray (zonos[i].dim, P) with z_i.V columns placed in the
             slots assigned to z_i's pred_ids; zero elsewhere.
     """
-    seen: dict = {}
-    order: list = []
-    for z in zonos:
-        for pid in z.pred_ids:
-            if pid not in seen:
-                seen[pid] = len(order)
-                order.append(pid)
-    P = len(order)
+    # All Zonos store pred_ids in sorted order with V columns permuted to
+    # match (Zono.__post_init__). The union is a sorted ndarray and the
+    # per-zono column map is np.searchsorted -- O(P log P + K log P) total.
+    pid_arrays = [z._pid_arr for z in zonos]
+    if not pid_arrays:
+        return (), []
+    union = pid_arrays[0]
+    for arr in pid_arrays[1:]:
+        if arr.size > 0:
+            union = np.union1d(union, arr) if union.size > 0 else arr
+    P = int(union.size)
     V_list = []
-    for z in zonos:
+    for z, arr in zip(zonos, pid_arrays):
         V_emb = np.zeros((z.dim, P), dtype=np.float64)
-        if z.n_pred > 0:
-            col_map = np.array([seen[pid] for pid in z.pred_ids], dtype=int)
+        if arr.size > 0:
+            col_map = np.searchsorted(union, arr)
             V_emb[:, col_map] = z.V
         V_list.append(V_emb)
-    return tuple(order), V_list
+    return tuple(union.tolist()), V_list
 
 
 def zono_add(z1: Zono, z2: Zono) -> Zono:
