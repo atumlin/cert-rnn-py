@@ -13,6 +13,15 @@ Layers, lowest to highest:
   - verification               (spec_*, certify_radius_*, bisect_epsilon)
 """
 
+from cert_rnn.analysis import (
+    concrete_lstm_ae_forward,
+    reach_stats,
+    reconstruction_score,
+    score_vs_eps,
+    tightness,
+    time_certify,
+    time_reach,
+)
 from cert_rnn.audit import lp_feasible
 from cert_rnn.from_torch import (
     lstm_ae_to_model_dicts,
@@ -106,5 +115,13 @@ __all__ = [
     "spec_c_score_ub",
     # audit
     "lp_feasible",
+    # analysis / diagnostics
+    "concrete_lstm_ae_forward",
+    "reconstruction_score",
+    "reach_stats",
+    "score_vs_eps",
+    "tightness",
+    "time_reach",
+    "time_certify",
 ]
 __version__ = "0.0.1"

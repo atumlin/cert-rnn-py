@@ -242,3 +242,99 @@ class LSTMAutoencoder:
             self.encoder, self.decoder, self.head, x_anchor, tau,
             eps_init, n_iters, threat_model,
         )
+
+    # ---- analysis / diagnostics (see cert_rnn.analysis) ----
+    def reconstruct(self, x_seq: np.ndarray) -> np.ndarray:
+        """Concrete reconstruction AE(x). x is (T, D) or (N, T, D)."""
+        from cert_rnn import analysis
+
+        return analysis.concrete_lstm_ae_forward(
+            self.encoder, self.decoder, self.head, x_seq
+        )
+
+    def score(self, x_seq: np.ndarray):
+        """Concrete reconstruction score mean((AE(x)-x)**2) (the anomaly score)."""
+        from cert_rnn import analysis
+
+        return analysis.reconstruction_score(
+            self.encoder, self.decoder, self.head, x_seq
+        )
+
+    def reach_stats(
+        self,
+        x_anchor: np.ndarray,
+        eps: float,
+        threat_model: ThreatModel = "multi_frame",
+        t_pert: int | None = None,
+    ) -> dict:
+        """Zonotope overapproximation stats (generators, interval widths, UB)."""
+        from cert_rnn import analysis
+
+        return analysis.reach_stats(
+            self.encoder, self.decoder, self.head, x_anchor, eps,
+            threat_model, t_pert,
+        )
+
+    def score_vs_eps(
+        self,
+        x_anchor: np.ndarray,
+        eps_list,
+        threat_model: ThreatModel = "multi_frame",
+        t_pert: int | None = None,
+    ):
+        """Sound worst-case score at each eps; list of (eps, score_ub)."""
+        from cert_rnn import analysis
+
+        return analysis.score_vs_eps(
+            self.encoder, self.decoder, self.head, x_anchor, eps_list,
+            threat_model, t_pert,
+        )
+
+    def tightness(
+        self,
+        x_anchor: np.ndarray,
+        eps: float,
+        n_samples: int = 2000,
+        threat_model: ThreatModel = "multi_frame",
+        t_pert: int | None = None,
+        seed: int = 0,
+    ) -> dict:
+        """Certified upper bound vs empirical (sampled) worst case."""
+        from cert_rnn import analysis
+
+        return analysis.tightness(
+            self.encoder, self.decoder, self.head, x_anchor, eps, n_samples,
+            threat_model, t_pert, seed,
+        )
+
+    def time_reach(
+        self,
+        x_anchor: np.ndarray,
+        eps: float,
+        threat_model: ThreatModel = "multi_frame",
+        t_pert: int | None = None,
+        repeat: int = 5,
+    ) -> float:
+        """Best-of-repeat wall-clock (s) for one abstract forward pass."""
+        from cert_rnn import analysis
+
+        return analysis.time_reach(
+            self.encoder, self.decoder, self.head, x_anchor, eps,
+            threat_model, t_pert, repeat,
+        )
+
+    def time_certify(
+        self,
+        x_anchor: np.ndarray,
+        tau: float,
+        threat_model: ThreatModel = "multi_frame",
+        n_iters: int = 12,
+        eps_init: float = 0.5,
+    ) -> dict:
+        """Wall-clock (s) for a full certified-radius computation."""
+        from cert_rnn import analysis
+
+        return analysis.time_certify(
+            self.encoder, self.decoder, self.head, x_anchor, tau,
+            threat_model, n_iters, eps_init,
+        )
