@@ -244,6 +244,41 @@ class LSTMAutoencoder:
         )
 
     # ---- analysis / diagnostics (see cert_rnn.analysis) ----
+    def preflight(
+        self,
+        x_anchor: np.ndarray,
+        tau: float | None = None,
+        torch_model=None,
+    ):
+        """Millisecond input-format validation before certify: anchor
+        shape/dtype/finiteness vs this model, tau headroom, and (if the
+        original torch model is passed) end-to-end score parity. Returns
+        a printable PreflightReport; see cert_rnn.analysis.preflight."""
+        from cert_rnn import analysis
+
+        return analysis.preflight(
+            self.encoder, self.decoder, self.head, x_anchor, tau, torch_model
+        )
+
+    def smoke_test(
+        self,
+        x_anchor: np.ndarray,
+        tau: float,
+        n_frames: int = 8,
+        n_iters: int = 3,
+        threat_model: ThreatModel = "multi_frame",
+        eps_init: float = 0.5,
+        full_n_iters: int = 12,
+    ) -> dict:
+        """Seconds-fast end-to-end check on x_anchor[:n_frames] plus a cost
+        forecast for the full-length certify. Run before a long certify."""
+        from cert_rnn import analysis
+
+        return analysis.smoke_test(
+            self.encoder, self.decoder, self.head, x_anchor, tau,
+            n_frames, n_iters, threat_model, eps_init, full_n_iters,
+        )
+
     def reconstruct(self, x_seq: np.ndarray) -> np.ndarray:
         """Concrete reconstruction AE(x). x is (T, D) or (N, T, D)."""
         from cert_rnn import analysis

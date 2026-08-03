@@ -108,3 +108,103 @@ def test_wrapper_methods(ae, anchor):
     t = ae.tightness(anchor, 0.02, n_samples=500)
     assert t["sound"]
     assert ae.time_reach(anchor, 0.02, repeat=1) > 0.0
+
+
+# --------------------------------------------------------------------------- #
+# smoke_test
+# --------------------------------------------------------------------------- #
+
+def test_smoke_test_runs_and_forecasts(ae, anchor):
+    out = ae.smoke_test(anchor, tau=5.0, n_frames=4, n_iters=2)
+    assert out["ok"] and out["parity_ok"]
+    assert out["T_smoke"] == 4 and out["T_full"] == T
+    assert out["parity_abs_diff"] < 1e-4
+    assert out["sec_per_reach_smoke"] > 0
+    assert out["smoke_certify_seconds"] > 0
+    # forecasts are finite, positive, and ordered:
+    # single_frame = T_full * multi_frame
+    assert out["est_sec_per_reach_full"] > 0
+    assert out["est_certify_multi_frame_s"] > 0
+    assert np.isclose(
+        out["est_certify_single_frame_s"],
+        T * out["est_certify_multi_frame_s"],
+    )
+
+
+def test_smoke_test_truncation_clamped(ae, anchor):
+    """n_frames > T just uses the full anchor."""
+    out = ae.smoke_test(anchor, tau=5.0, n_frames=100, n_iters=2)
+    assert out["T_smoke"] == T
+    assert out["ok"]
+
+
+# --------------------------------------------------------------------------- #
+# preflight
+# --------------------------------------------------------------------------- #
+
+def test_preflight_good_anchor_passes(ae, anchor):
+    rep = ae.preflight(anchor, tau=10.0)
+    assert rep.ok
+    statuses = {name: s for s, name, _ in rep.checks}
+    assert statuses["shape"] == "pass"
+    assert statuses["finite"] == "pass"
+    assert statuses["tau"] == "pass"
+    assert "OK" in str(rep)
+
+
+def test_preflight_batch_input_fails(ae, anchor):
+    rep = ae.preflight(np.stack([anchor, anchor]))
+    assert not rep.ok
+    assert any("BATCH" in d for _, _, d in rep.checks)
+
+
+def test_preflight_transposed_fails_with_hint(ae, anchor):
+    rep = ae.preflight(anchor.T)
+    assert not rep.ok
+    assert any("TRANSPOSED" in d for _, _, d in rep.checks)
+
+
+def test_preflight_1d_fails(ae):
+    rep = ae.preflight(np.zeros(8))
+    assert not rep.ok
+
+
+def test_preflight_nan_fails(ae, anchor):
+    bad = anchor.copy()
+    bad[0, 0] = np.nan
+    rep = ae.preflight(bad)
+    assert not rep.ok
+    assert any(name == "finite" and s == "fail" for s, name, _ in rep.checks)
+
+
+def test_preflight_tau_below_score_warns(ae, anchor):
+    score = ae.score(anchor)
+    rep = ae.preflight(anchor, tau=score / 2)
+    assert rep.ok  # warn, not fail
+    assert any(name == "tau" and s == "warn" for s, name, _ in rep.checks)
+    rep_bad = ae.preflight(anchor, tau=-1.0)
+    assert not rep_bad.ok
+
+
+def test_preflight_torch_parity(ae, anchor):
+    import torch
+
+    class MatchingModel:
+        """Callable that reproduces the tool's own forward -- parity holds."""
+        def parameters(self):
+            return iter([torch.zeros(1, dtype=torch.float64)])
+        def __call__(self, xt):
+            x_hat = analysis.concrete_lstm_ae_forward(
+                ae.encoder, ae.decoder, ae.head, xt.squeeze(0).numpy())
+            return torch.as_tensor(x_hat, dtype=torch.float64).unsqueeze(0)
+
+    rep = ae.preflight(anchor, torch_model=MatchingModel())
+    assert rep.ok
+    assert any(name == "torch parity" and s == "pass" for s, name, _ in rep.checks)
+
+    class WrongModel(MatchingModel):
+        def __call__(self, xt):
+            return super().__call__(xt) + 1.0
+
+    rep_bad = ae.preflight(anchor, torch_model=WrongModel())
+    assert not rep_bad.ok

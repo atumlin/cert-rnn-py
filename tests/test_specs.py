@@ -126,3 +126,61 @@ def test_custom_spec_duck_typed():
 
     res = certify(model, x, PositiveLogit(), n_iters=5)
     assert isinstance(res, CertResult)
+
+
+# ---------- timing fields + frames subset ----------
+
+def _tiny_ae():
+    torch.manual_seed(9)
+    enc = nn.LSTMCell(3, 4).double()
+    dec = nn.LSTMCell(4, 4).double()
+    head = nn.Linear(4, 3).double()
+    return LSTMAutoencoder.from_torch(enc, dec, head)
+
+
+def test_certify_records_timing():
+    ae = _tiny_ae()
+    x = np.random.default_rng(3).standard_normal((5, 3))
+    res = certify(ae, x, ReconErrorSpec(5.0), n_iters=4)
+    assert np.isfinite(res.seconds) and res.seconds > 0
+    # single_frame: T=5 bisections, each n_iters..n_iters+1 reach calls
+    assert 5 * 4 <= res.n_reach_calls <= 5 * 5
+    assert res.sec_per_reach == pytest.approx(res.seconds / res.n_reach_calls)
+    assert res.per_frame_seconds.shape == (5,)
+    assert np.all(np.isfinite(res.per_frame_seconds))
+    assert "time:" in str(res)
+
+    res_mf = certify(ae, x, ReconErrorSpec(5.0), threat_model="multi_frame", n_iters=4)
+    assert np.isfinite(res_mf.seconds)
+    assert 4 <= res_mf.n_reach_calls <= 5
+    assert res_mf.per_frame_seconds is None
+
+
+def test_certify_frames_subset_matches_full():
+    ae = _tiny_ae()
+    x = np.random.default_rng(3).standard_normal((5, 3))
+    reset_pred_allocator()
+    full = certify(ae, x, ReconErrorSpec(5.0), n_iters=4)
+    reset_pred_allocator()
+    sub = certify(ae, x, ReconErrorSpec(5.0), n_iters=4, frames=[0, 3])
+    # checked frames agree with the full run; unchecked are NaN
+    assert sub.per_frame[0] == full.per_frame[0]
+    assert sub.per_frame[3] == full.per_frame[3]
+    assert np.isnan(sub.per_frame[1]) and np.isnan(sub.per_frame[2])
+    assert sub.radius == min(full.per_frame[0], full.per_frame[3])
+    assert sub.frames == (0, 3)
+    assert "frames checked" in str(sub)
+    # full run leaves frames=None and no NaNs
+    assert full.frames is None
+    assert np.all(np.isfinite(full.per_frame))
+
+
+def test_certify_frames_validation():
+    ae = _tiny_ae()
+    x = np.random.default_rng(3).standard_normal((5, 3))
+    with pytest.raises(ValueError, match="out of range"):
+        certify(ae, x, ReconErrorSpec(5.0), frames=[7])
+    with pytest.raises(ValueError, match="non-empty"):
+        certify(ae, x, ReconErrorSpec(5.0), frames=[])
+    with pytest.raises(ValueError, match="single_frame"):
+        certify(ae, x, ReconErrorSpec(5.0), threat_model="multi_frame", frames=[0])

@@ -24,6 +24,7 @@ return data (no printing) so callers can format as they like.
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -200,6 +201,246 @@ def tightness(encoder, decoder, head, x_anchor, eps, n_samples: int = 2000,
         "ratio": (ub / emp_max) if emp_max > 0 else float("inf"),
         "sound": bool(ub >= emp_max - 1e-9),
         "n_samples": int(n_samples),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# preflight (input-format validation before certify)
+# --------------------------------------------------------------------------- #
+@dataclass
+class PreflightReport:
+    """Result of `preflight`. `ok` is True iff no check FAILed (WARNs and
+    infos don't block). `checks` is a list of (status, name, detail)
+    tuples with status in {"pass", "fail", "warn", "info"}. Print the
+    report for a human-readable summary."""
+
+    ok: bool
+    checks: list
+
+    def __str__(self) -> str:
+        lines = [f"Preflight: {'OK -- safe to certify' if self.ok else 'FAILED -- fix before certifying'}"]
+        for status, name, detail in self.checks:
+            lines.append(f"  [{status.upper():4s}] {name}: {detail}")
+        return "\n".join(lines)
+
+
+def preflight(encoder, decoder, head, x_anchor, tau=None,
+              torch_model=None) -> PreflightReport:
+    """Validate the anchor (and optionally tau / torch parity) BEFORE a
+    long certify run. Milliseconds; catches the mistakes that otherwise
+    surface as cryptic engine errors or silently-wrong results.
+
+    Checks, in order (structural failures stop early):
+      1. anchor is numeric and convertible to float64
+      2. anchor is a single (T, D) window -- catches batched (N, T, D)
+         input, 1-D input needing reshape(-1, 1), and transposed (D, T)
+      3. anchor's feature axis matches the model's D
+      4. all values finite (no NaN/Inf)
+      5. [info] value range -- eyeball that it matches training scaling
+      6. [info] concrete anchor score; if `tau` given, checks the spec
+         is not already violated at eps=0 (certify would return 0)
+      7. if `torch_model` given (a callable mapping a (1, T, D) tensor
+         to a (1, T, D) tensor), end-to-end parity: the tool's forward
+         must reproduce the torch model's reconstruction score. This is
+         THE topology check -- run it once per model.
+
+    The model-side wiring (layer sizes, decoder-reads-latent, head dims)
+    is already validated at construction by from_torch; preflight covers
+    the anchor side that construction cannot see.
+    """
+    checks: list = []
+
+    def add(status: str, name: str, detail: str) -> None:
+        checks.append((status, name, detail))
+
+    def done() -> PreflightReport:
+        return PreflightReport(not any(s == "fail" for s, _, _ in checks), checks)
+
+    D, H = int(encoder["D"]), int(encoder["H"])
+
+    # 1. numeric / convertible
+    try:
+        x = np.asarray(x_anchor, dtype=np.float64)
+    except (TypeError, ValueError) as e:
+        add("fail", "dtype", f"anchor is not convertible to float64: {e}")
+        return done()
+    src_dtype = getattr(np.asarray(x_anchor), "dtype", "unknown")
+    add("pass", "dtype", f"convertible to float64 (source dtype: {src_dtype})")
+
+    # 2. rank
+    if x.ndim == 3:
+        add("fail", "shape",
+            f"got {x.shape} -- looks like a BATCH of windows; certify takes "
+            f"ONE (T, D) window. Index it first, e.g. X[i].")
+        return done()
+    if x.ndim == 1:
+        hint = " reshape(-1, 1) to make it (T, 1)." if D == 1 else ""
+        add("fail", "shape",
+            f"got 1-D shape {x.shape}; expected (T, D=({D})).{hint}")
+        return done()
+    if x.ndim != 2:
+        add("fail", "shape", f"got {x.ndim}-D shape {x.shape}; expected (T, D)")
+        return done()
+    T, d = x.shape
+
+    # 3. feature axis
+    if d != D:
+        hint = (" Axis 0 matches D -- the anchor looks TRANSPOSED; pass x.T."
+                if T == D else "")
+        add("fail", "feature dim",
+            f"anchor last axis is {d} but the model expects D={D}.{hint}")
+        return done()
+    add("pass", "shape", f"(T={T}, D={D}) matches the model (H={H})")
+    add("info", "seq length",
+        f"T={T}; the engine accepts any T -- confirm it equals your "
+        f"training window length (cost per reach grows ~T^2)")
+
+    # 4. finiteness
+    n_bad = int(np.size(x) - np.sum(np.isfinite(x)))
+    if n_bad:
+        add("fail", "finite", f"{n_bad} NaN/Inf value(s) in the anchor")
+        return done()
+    add("pass", "finite", "no NaN/Inf")
+
+    # 5. scaling eyeball
+    add("info", "value range",
+        f"[{x.min():.4g}, {x.max():.4g}], mean {x.mean():.4g} -- must be in "
+        f"the same scaling/normalization used at training time")
+
+    # 6. concrete score vs tau
+    score = reconstruction_score(encoder, decoder, head, x)
+    add("info", "anchor score", f"{score:.6g} (concrete, eps=0)")
+    if tau is not None:
+        if not np.isfinite(tau) or tau <= 0:
+            add("fail", "tau", f"tau={tau} must be a finite positive number")
+        elif score > tau:
+            add("warn", "tau",
+                f"anchor score {score:.6g} > tau={tau:.6g} -- the spec is "
+                f"already violated at eps=0; certify will return radius 0")
+        else:
+            add("pass", "tau",
+                f"tau={tau:.6g} leaves {tau / score:.2f}x headroom over the "
+                f"anchor score")
+
+    # 7. torch parity (the topology check)
+    if torch_model is not None:
+        import torch
+
+        try:
+            p = next(torch_model.parameters())
+            t_dtype = p.dtype
+        except (AttributeError, StopIteration):
+            t_dtype = torch.float32
+        with torch.no_grad():
+            xt = torch.as_tensor(x, dtype=t_dtype).unsqueeze(0)
+            recon = torch_model(xt).squeeze(0).cpu().numpy().astype(np.float64)
+        if recon.shape != x.shape:
+            add("fail", "torch parity",
+                f"torch model returned shape {recon.shape}, expected {x.shape}")
+            return done()
+        model_score = float(((recon - x) ** 2).mean())
+        diff = abs(model_score - score)
+        tol = 1e-4 * max(1.0, abs(model_score))
+        if diff <= tol:
+            add("pass", "torch parity",
+                f"tool score {score:.6g} == torch score {model_score:.6g} "
+                f"(|diff|={diff:.2e})")
+        else:
+            add("fail", "torch parity",
+                f"tool score {score:.6g} != torch score {model_score:.6g} "
+                f"(|diff|={diff:.2e}) -- the extracted model does NOT "
+                f"compute the same function; check the topology mapping "
+                f"(latent fed to decoder each step, per-step head)")
+    return done()
+
+
+# --------------------------------------------------------------------------- #
+# smoke test (seconds-fast pipeline check + cost forecast)
+# --------------------------------------------------------------------------- #
+def smoke_test(encoder, decoder, head, x_anchor, tau,
+               n_frames: int = 8, n_iters: int = 3,
+               threat_model: ThreatModel = "multi_frame",
+               eps_init: float = 0.5, full_n_iters: int = 12) -> dict:
+    """Fast end-to-end check on a truncated anchor, plus a cost forecast
+    for the full-length run. Runs in seconds; run this BEFORE committing
+    to a multi-minute/-hour certify.
+
+    On ``x_anchor[:n_frames]`` it runs:
+      1. an eps=0 internal parity check -- the abstract engine's score at
+         eps=0 must equal the concrete numpy forward's score (catches
+         model-dict / shape / topology problems). NOTE: this checks the
+         engine against itself; parity against your ORIGINAL torch model
+         should be checked once separately (verify_ae.py step 4).
+      2. one timed abstract reach -- the unit of cost everything scales in,
+      3. a short Algorithm-1 bisection (``n_iters``) end-to-end.
+    It then times a second reach at ``2*n_frames`` (when the anchor is long
+    enough), fits the empirical cost-growth exponent in T, and forecasts:
+      - ``est_sec_per_reach_full``: one reach at the full length,
+      - ``est_certify_multi_frame_s``:  (full_n_iters+1) reaches,
+      - ``est_certify_single_frame_s``: T_full * (full_n_iters+1) reaches.
+
+    Returns a dict with all of the above plus ``ok`` (parity passed and
+    the smoke bisection completed).
+    """
+    x_anchor = np.asarray(x_anchor, dtype=np.float64)
+    T_full = int(x_anchor.shape[0])
+    Ts = int(min(n_frames, T_full))
+    x_s = x_anchor[:Ts]
+    tp = _t_pert(threat_model, None)
+
+    # 1. eps=0 parity: input zonos are points, so the abstract score upper
+    # bound collapses to the concrete score (up to fp noise).
+    z_xh, z_x = lstm_ae_reach(encoder, decoder, head, x_s, 0.0,
+                              "single_frame", 0)
+    ub0 = spec_c_score_ub(z_xh, z_x)
+    concrete = reconstruction_score(encoder, decoder, head, x_s)
+    parity_diff = abs(ub0 - concrete)
+    parity_ok = bool(parity_diff < 1e-4)
+
+    # 2. one timed reach at the truncated length
+    t0 = time.perf_counter()
+    z_xh, z_x = lstm_ae_reach(encoder, decoder, head, x_s, float(eps_init),
+                              threat_model, tp)
+    dt1 = time.perf_counter() - t0
+    score_ub_smoke = spec_c_score_ub(z_xh, z_x)
+
+    # 3. short bisection end-to-end (exercises the full certify path)
+    t0 = time.perf_counter()
+    smoke_radius, _ = certify_radius_spec_c(
+        encoder, decoder, head, x_s, tau, eps_init, n_iters, threat_model
+    )
+    dt_cert = time.perf_counter() - t0
+
+    # 4. fit the cost-growth exponent from a second, longer reach; fall
+    # back to the theoretical ~quadratic growth when the anchor is short.
+    T2 = int(min(2 * Ts, T_full))
+    if T2 > Ts and dt1 > 0:
+        t0 = time.perf_counter()
+        lstm_ae_reach(encoder, decoder, head, x_anchor[:T2], float(eps_init),
+                      threat_model, _t_pert(threat_model, None))
+        dt2 = time.perf_counter() - t0
+        growth = float(np.log(dt2 / dt1) / np.log(T2 / Ts)) if dt2 > dt1 else 2.0
+        est_reach_full = dt2 * (T_full / T2) ** growth
+    else:
+        growth = 2.0
+        est_reach_full = dt1 * (T_full / Ts) ** growth if Ts else float("nan")
+
+    evals = full_n_iters + 1  # bisect_epsilon: n_iters steps + final re-check
+    return {
+        "ok": parity_ok and np.isfinite(smoke_radius),
+        "T_full": T_full,
+        "T_smoke": Ts,
+        "threat_model": threat_model,
+        "parity_abs_diff": float(parity_diff),
+        "parity_ok": parity_ok,
+        "smoke_radius": float(smoke_radius),
+        "smoke_score_ub_at_eps_init": float(score_ub_smoke),
+        "smoke_certify_seconds": float(dt_cert),
+        "sec_per_reach_smoke": float(dt1),
+        "growth_exponent": growth,
+        "est_sec_per_reach_full": float(est_reach_full),
+        "est_certify_multi_frame_s": float(evals * est_reach_full),
+        "est_certify_single_frame_s": float(T_full * evals * est_reach_full),
     }
 
 
