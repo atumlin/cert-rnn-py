@@ -328,11 +328,11 @@ def preflight(encoder, decoder, head, x_anchor, tau=None,
 
         try:
             p = next(torch_model.parameters())
-            t_dtype = p.dtype
+            t_dtype, t_device = p.dtype, p.device
         except (AttributeError, StopIteration):
-            t_dtype = torch.float32
+            t_dtype, t_device = torch.float32, "cpu"
         with torch.no_grad():
-            xt = torch.as_tensor(x, dtype=t_dtype).unsqueeze(0)
+            xt = torch.as_tensor(x, dtype=t_dtype, device=t_device).unsqueeze(0)
             recon = torch_model(xt).squeeze(0).cpu().numpy().astype(np.float64)
         if recon.shape != x.shape:
             add("fail", "torch parity",
