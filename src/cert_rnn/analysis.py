@@ -327,13 +327,30 @@ def preflight(encoder, decoder, head, x_anchor, tau=None,
         import torch
 
         try:
-            p = next(torch_model.parameters())
-            t_dtype, t_device = p.dtype, p.device
-        except (AttributeError, StopIteration):
+            params = list(torch_model.parameters())
+        except AttributeError:
+            params = []
+        dtypes = sorted({str(p.dtype) for p in params})
+        if len(dtypes) > 1:
+            add("fail", "torch parity",
+                f"torch model has MIXED parameter dtypes {dtypes} -- its own "
+                f"forward will fail. A common cause is an in-place .double() "
+                f"on a submodule during conversion (nn.Module.double() "
+                f"mutates); restore with model.float() and drop the "
+                f".double() -- from_torch casts to float64 internally.")
+            return done()
+        if params:
+            t_dtype, t_device = params[0].dtype, params[0].device
+        else:
             t_dtype, t_device = torch.float32, "cpu"
-        with torch.no_grad():
-            xt = torch.as_tensor(x, dtype=t_dtype, device=t_device).unsqueeze(0)
-            recon = torch_model(xt).squeeze(0).cpu().numpy().astype(np.float64)
+        try:
+            with torch.no_grad():
+                xt = torch.as_tensor(x, dtype=t_dtype, device=t_device).unsqueeze(0)
+                recon = torch_model(xt).squeeze(0).cpu().numpy().astype(np.float64)
+        except Exception as e:  # report, don't crash the preflight
+            add("fail", "torch parity",
+                f"torch model forward raised {type(e).__name__}: {e}")
+            return done()
         if recon.shape != x.shape:
             add("fail", "torch parity",
                 f"torch model returned shape {recon.shape}, expected {x.shape}")

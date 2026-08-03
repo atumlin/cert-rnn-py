@@ -208,3 +208,25 @@ def test_preflight_torch_parity(ae, anchor):
 
     rep_bad = ae.preflight(anchor, torch_model=WrongModel())
     assert not rep_bad.ok
+
+
+def test_preflight_mixed_dtype_torch_model_fails_cleanly(ae, anchor):
+    import torch
+    import torch.nn as nn
+
+    mixed = nn.Sequential(nn.Linear(D, D).float(), nn.Linear(D, D).double())
+    rep = ae.preflight(anchor, torch_model=mixed)
+    assert not rep.ok
+    assert any("MIXED" in d for _, _, d in rep.checks)
+
+
+def test_preflight_raising_torch_model_fails_cleanly(ae, anchor):
+    class Broken:
+        def parameters(self):
+            return iter([])
+        def __call__(self, xt):
+            raise RuntimeError("boom")
+
+    rep = ae.preflight(anchor, torch_model=Broken())
+    assert not rep.ok
+    assert any("boom" in d for _, _, d in rep.checks)
