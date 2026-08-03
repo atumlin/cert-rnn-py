@@ -249,15 +249,18 @@ class LSTMAutoencoder:
         x_anchor: np.ndarray,
         tau: float | None = None,
         torch_model=None,
+        title: str = "",
     ):
         """Millisecond input-format validation before certify: anchor
         shape/dtype/finiteness vs this model, tau headroom, and (if the
-        original torch model is passed) end-to-end score parity. Returns
+        original torch model is passed) end-to-end score parity. `title`
+        labels the printed report (e.g. "bus9 AE, anchor #1424"). Returns
         a printable PreflightReport; see cert_rnn.analysis.preflight."""
         from cert_rnn import analysis
 
         return analysis.preflight(
-            self.encoder, self.decoder, self.head, x_anchor, tau, torch_model
+            self.encoder, self.decoder, self.head, x_anchor, tau, torch_model,
+            title,
         )
 
     def smoke_test(

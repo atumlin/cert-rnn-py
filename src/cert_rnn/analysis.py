@@ -211,21 +211,31 @@ def tightness(encoder, decoder, head, x_anchor, eps, n_samples: int = 2000,
 class PreflightReport:
     """Result of `preflight`. `ok` is True iff no check FAILed (WARNs and
     infos don't block). `checks` is a list of (status, name, detail)
-    tuples with status in {"pass", "fail", "warn", "info"}. Print the
-    report for a human-readable summary."""
+    tuples with status in {"pass", "fail", "warn", "info"}. `title` is
+    the caller's label for the run; `subject` is a one-line summary of
+    what was checked (model dims, anchor shape, tau). Print the report
+    for a human-readable summary."""
 
     ok: bool
     checks: list
+    title: str = ""
+    subject: str = ""
 
     def __str__(self) -> str:
-        lines = [f"Preflight: {'OK -- safe to certify' if self.ok else 'FAILED -- fix before certifying'}"]
+        name = f" [{self.title}]" if self.title else ""
+        lines = [
+            f"Preflight{name}: "
+            f"{'OK -- safe to certify' if self.ok else 'FAILED -- fix before certifying'}"
+        ]
+        if self.subject:
+            lines.append(f"  checking: {self.subject}")
         for status, name, detail in self.checks:
             lines.append(f"  [{status.upper():4s}] {name}: {detail}")
         return "\n".join(lines)
 
 
 def preflight(encoder, decoder, head, x_anchor, tau=None,
-              torch_model=None) -> PreflightReport:
+              torch_model=None, title: str = "") -> PreflightReport:
     """Validate the anchor (and optionally tau / torch parity) BEFORE a
     long certify run. Milliseconds; catches the mistakes that otherwise
     surface as cryptic engine errors or silently-wrong results.
@@ -249,14 +259,26 @@ def preflight(encoder, decoder, head, x_anchor, tau=None,
     the anchor side that construction cannot see.
     """
     checks: list = []
+    D, H = int(encoder["D"]), int(encoder["H"])
+    try:
+        anchor_shape = tuple(np.asarray(x_anchor).shape)
+    except Exception:
+        anchor_shape = "?"
+    subject = (
+        f"model D={D} H={H} L_enc={int(encoder['L'])} L_dec={int(decoder['L'])}"
+        f" | anchor {anchor_shape}"
+        + (f" | tau={float(tau):.6g}" if isinstance(tau, (int, float, np.floating)) else
+           f" | tau={tau!r}" if tau is not None else "")
+        + (" | torch parity: yes" if torch_model is not None else "")
+    )
 
     def add(status: str, name: str, detail: str) -> None:
         checks.append((status, name, detail))
 
     def done() -> PreflightReport:
-        return PreflightReport(not any(s == "fail" for s, _, _ in checks), checks)
-
-    D, H = int(encoder["D"]), int(encoder["H"])
+        return PreflightReport(
+            not any(s == "fail" for s, _, _ in checks), checks, title, subject
+        )
 
     # 1. numeric / convertible
     try:

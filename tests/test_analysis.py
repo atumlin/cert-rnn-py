@@ -230,3 +230,16 @@ def test_preflight_raising_torch_model_fails_cleanly(ae, anchor):
     rep = ae.preflight(anchor, torch_model=Broken())
     assert not rep.ok
     assert any("boom" in d for _, _, d in rep.checks)
+
+
+def test_preflight_title_and_subject_in_report(ae, anchor):
+    rep = ae.preflight(anchor, tau=10.0, title="unit-test run")
+    s = str(rep)
+    assert "Preflight [unit-test run]:" in s
+    assert f"model D={D} H={H}" in s
+    assert f"anchor ({T}, {D})" in s
+    assert "tau=10" in s
+    # no title -> no brackets, subject still present
+    s2 = str(ae.preflight(anchor))
+    assert s2.startswith("Preflight:")
+    assert "checking:" in s2
