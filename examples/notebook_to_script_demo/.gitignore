@@ -1,0 +1,5 @@
+lstm_ae_checkpoint.pt
+verify_inputs.npz
+results_overnight.npz
+verify_overnight_template.py
+verify.log

@@ -34,6 +34,9 @@ Options:
                                    radius) instead of per-frame (~hours)
     --frames 0 16 32 48            single_frame subset instead of all T
     --n-iters 12                   bisection depth (fewer = faster, coarser)
+    --eps-init 0.5                 bisection starting radius; use a smaller
+                                   value (e.g. 0.1) when your data scale
+                                   makes 0.5 an enormous perturbation
     --smoke-only                   preflight + smoke test, then exit
 """
 
@@ -87,6 +90,7 @@ def main() -> int:
     p.add_argument("--frames", nargs="+", type=int, default=None,
                    help="single_frame: subset of frame indices (default: all)")
     p.add_argument("--n-iters", type=int, default=12)
+    p.add_argument("--eps-init", type=float, default=0.5)
     p.add_argument("--smoke-only", action="store_true")
     args = p.parse_args()
 
@@ -128,7 +132,7 @@ def main() -> int:
     # ---- multi_frame: one joint bisection, minutes ---------------------------
     if args.threat_model == "multi_frame":
         res = ae.certify(anchor, ReconErrorSpec(tau), threat_model="multi_frame",
-                         n_iters=args.n_iters, progress=log)
+                         n_iters=args.n_iters, eps_init=args.eps_init, progress=log)
         log(str(res))
         np.savez(RESULTS, radius=res.radius, tau=tau, threat_model="multi_frame",
                  seconds=res.seconds)
@@ -151,7 +155,7 @@ def main() -> int:
         if np.isfinite(radii[t]):
             continue
         res = ae.certify(anchor, ReconErrorSpec(tau), frames=[t],
-                         n_iters=args.n_iters, progress=log)
+                         n_iters=args.n_iters, eps_init=args.eps_init, progress=log)
         radii[t], seconds[t] = res.per_frame[t], res.seconds
         np.savez(out, radii=radii, seconds=seconds, tau=tau,
                  threat_model="single_frame")
