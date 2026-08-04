@@ -184,3 +184,21 @@ def test_certify_frames_validation():
         certify(ae, x, ReconErrorSpec(5.0), frames=[])
     with pytest.raises(ValueError, match="single_frame"):
         certify(ae, x, ReconErrorSpec(5.0), threat_model="multi_frame", frames=[0])
+
+
+def test_certify_progress_callback():
+    ae = _tiny_ae()
+    x = np.random.default_rng(3).standard_normal((5, 3))
+    lines = []
+    res = certify(ae, x, ReconErrorSpec(5.0), n_iters=4, frames=[0, 2],
+                  progress=lines.append)
+    # one line per reach call + one per completed frame
+    assert len(lines) == res.n_reach_calls + 2
+    assert any(l.startswith("eval 1/") and "frame=0" in l for l in lines)
+    assert sum("done" in l for l in lines) == 2
+    assert any("radius=" in l for l in lines)
+
+    lines_mf = []
+    certify(ae, x, ReconErrorSpec(5.0), threat_model="multi_frame", n_iters=4,
+            progress=lines_mf.append)
+    assert all("frame=all" in l for l in lines_mf)

@@ -177,6 +177,7 @@ def certify(
     eps_init: float = 0.5,
     n_iters: int = 12,
     frames: Sequence[int] | None = None,
+    progress=None,
 ) -> CertResult:
     """Certify `spec` on `model` at input `x` via Algorithm 1 bisection.
 
@@ -193,6 +194,14 @@ def certify(
     Wall-clock timing and reach-call counts are always recorded on the
     result (`seconds`, `n_reach_calls`, `sec_per_reach`,
     `per_frame_seconds`), so no separate timing call is needed.
+
+    `progress` is an optional callable receiving one short string per
+    bisection evaluation (i.e., per abstract reach -- the natural
+    heartbeat for long runs) and per completed frame. Pass `print`, or a
+    line-buffered file writer for detached/overnight runs:
+
+        log = open("progress.log", "a", buffering=1)
+        certify(..., progress=lambda s: print(s, file=log))
     """
     if not hasattr(model, "reach_output"):
         raise TypeError(
@@ -201,13 +210,23 @@ def certify(
         )
     x = np.asarray(x, dtype=np.float64)
     n_calls = 0
+    n_evals_expected = 0  # set once the bisection count is known
+    t_start = time.perf_counter()
 
     def at(eps: float, t_pert: int | None) -> bool:
         nonlocal n_calls
         n_calls += 1
-        return spec.holds(model.reach_output(x, eps, threat_model, t_pert))
-
-    t_start = time.perf_counter()
+        t0 = time.perf_counter()
+        ok = spec.holds(model.reach_output(x, eps, threat_model, t_pert))
+        if progress is not None:
+            frame = "all" if t_pert is None else t_pert
+            progress(
+                f"eval {n_calls}/~{n_evals_expected}  frame={frame}  "
+                f"eps={eps:.6g}  -> {'holds' if ok else 'fails'}  "
+                f"({time.perf_counter() - t0:.1f}s, "
+                f"{time.perf_counter() - t_start:.0f}s elapsed)"
+            )
+        return ok
     if threat_model == "single_frame":
         T = x.shape[0]
         if frames is None:
@@ -219,14 +238,20 @@ def certify(
                 raise ValueError(f"frames {bad} out of range [0, {T})")
             if not sel:
                 raise ValueError("frames must be non-empty")
+        n_evals_expected = len(sel) * (n_iters + 1)
         per_frame = np.full(T, np.nan)
         per_frame_seconds = np.full(T, np.nan)
-        for t in sel:
+        for i, t in enumerate(sel):
             t0 = time.perf_counter()
             per_frame[t] = bisect_epsilon(
                 lambda e, _t=t: at(e, _t), eps_init, n_iters
             )
             per_frame_seconds[t] = time.perf_counter() - t0
+            if progress is not None:
+                progress(
+                    f"frame {t} done ({i + 1}/{len(sel)}): "
+                    f"radius={per_frame[t]:.6g}  ({per_frame_seconds[t]:.0f}s)"
+                )
         return CertResult(
             float(np.min(per_frame[sel])), per_frame, threat_model, repr(spec),
             eps_init, n_iters,
@@ -241,6 +266,7 @@ def certify(
                 "frames= only applies to threat_model='single_frame' "
                 "(multi_frame perturbs all frames jointly in one bisection)"
             )
+        n_evals_expected = n_iters + 1
         eps = bisect_epsilon(lambda e: at(e, None), eps_init, n_iters)
         return CertResult(
             eps, None, threat_model, repr(spec), eps_init, n_iters,
