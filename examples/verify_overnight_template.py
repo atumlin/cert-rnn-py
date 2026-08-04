@@ -43,13 +43,36 @@ Options:
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 import numpy as np
 import torch
 import torch.nn as nn
 
-from cert_rnn import LSTMAutoencoder, ReconErrorSpec
+try:
+    from cert_rnn import LSTMAutoencoder, ReconErrorSpec
+except ModuleNotFoundError:
+    # Not installed in this env -- look for a cert-rnn-py checkout in any
+    # ancestor directory (e.g. script in <root>/fl_v2/Notebooks/ with the
+    # checkout at <root>/cert-rnn-py/).
+    _here = Path(__file__).resolve()
+    for _parent in _here.parents:
+        _src = _parent / "cert-rnn-py" / "src"
+        if (_src / "cert_rnn").is_dir():
+            sys.path.insert(0, str(_src))
+            break
+    else:
+        sys.exit(
+            "cert_rnn is not importable from this python "
+            f"({sys.executable}) and no cert-rnn-py checkout was found in "
+            f"any ancestor of {_here.parent}.\nFix permanently with:\n"
+            "    pip install -e /path/to/cert-rnn-py\n"
+            "(in the SAME env your notebook kernel uses), or run with:\n"
+            "    PYTHONPATH=/path/to/cert-rnn-py/src python -u "
+            "verify_overnight_template.py"
+        )
+    from cert_rnn import LSTMAutoencoder, ReconErrorSpec
 
 # ---- paths + your model's state_dict layout --------------------------------
 CKPT = "lstm_ae_checkpoint.pt"
