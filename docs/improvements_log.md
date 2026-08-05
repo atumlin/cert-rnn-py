@@ -27,6 +27,15 @@ default (cost note below).
 | D (H=16,L=2) | 1.23× | 1.34× | 1.43× |
 | L (H=64)     | 1.05× | 1.07× | 1.10× |
 
+**Full 30-frame E1 (pruned engine, k=12), the paper-table numbers:**
+
+| size | joint min (mean) | cw min (mean) | gain | joint time | cw time |
+|---|---|---|---|---|---|
+| S | 0.01611 (0.02730) | 0.01282 (0.02130) | **1.26×** | 20 s | 15 s |
+| M | 0.02039 (0.02487) | 0.01331 (0.01715) | **1.53×** | 134 s | 53 s |
+| D | 0.03027 (0.03644) | 0.02283 (0.02711) | **1.33×** | 457 s | 153 s |
+| L | 0.02405 (0.03005) | 0.02295 (0.02811) | 1.05× | 1758 s | 677 s |
+
 **Cost.** One Gram product per query, growing with generator count P:
 S ≈ free; M ~3×/query (pre-pruning); D ~5×; L ~8× (~104 s per frame
 bisection pre-pruning). Trade-off is favorable everywhere except L,
@@ -37,6 +46,16 @@ models, keep componentwise for wide-H speed runs.
 
 **Quality risk:** none — strictly sound, strictly ≥ componentwise
 radii by construction.
+
+**Scope nuance (measured, E3 rerun).** Under the *multi-frame* threat
+model on the synthetic center detector the joint bound is nearly a
+no-op: false-alarm radii +0–4%, masking radii +0%. The gain is
+concentrated in single-frame IEEE-9 (D=36, one perturbed frame) where
+cross-component cancellation is strong. So: report joint for E1
+(single-frame), keep the E3 detector table on the componentwise bound
+— its numbers were already tight there. The masking lower bound's
+norm-based term never beat the componentwise form on any tested
+window (the `max(·,·)` always picked componentwise).
 
 ## B. Zero-width fresh-generator pruning — ADOPTED ✅
 
@@ -61,7 +80,10 @@ now drops all-zero columns from both sides (order still checked).
 | S | 15 s  | 12.8 s  | 1.17× |
 | M | 53 s  | 40.2 s  | 1.32× |
 | D | 153 s | 110.5 s | 1.38× |
-| L | 677 s | (running) | — |
+| L | 677 s | 428.3 s | 1.58× |
+
+Speedup grows with model size (P² effects in alignment/ranges), and
+all four full-30-frame radii are bit-identical to the baselines.
 
 Also shrinks the joint bound's Gram cost (P smaller). No degradation
 anywhere.

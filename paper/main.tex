@@ -309,10 +309,28 @@ $[l_{td}, u_{td}]$ from $Z_{r_t}$,
 which are sound for the sup/inf of the score since a sum's extremum is
 bounded by the sum of componentwise extrema. $\score_{\ub} \le \tau$
 certifies false-alarm robustness; $\score_{\lb} \ge \tau$ certifies
-masking robustness. The looseness of \eqref{eq:bounds} relative to a
-joint quadratic optimization over the zonotope is measured empirically
-in \S\ref{sec:results} \todo{E4 gap numbers}; tightening it (e.g.\ by
-quadratic programming over the generator box) is a natural next step.
+masking robustness.
+
+\textbf{Joint quadratic bound.} Equation~\eqref{eq:bounds} discards
+that every residual component is a function of the \emph{same}
+generator vector. Stacking the residual zonotopes into the union
+predicate space, $\score = \tfrac{1}{N}\lVert c + V\alpha\rVert^2$
+with $\alpha \in [-1,1]^P$, and
+\begin{equation}
+\label{eq:joint}
+\sup_\alpha\, \lVert c + V\alpha\rVert^2 \;\le\; \lVert c\rVert^2
+  + 2\lVert V^\top c\rVert_1 + \textstyle\sum_{ij}\bigl|(V^\top V)_{ij}\bigr|,
+\end{equation}
+which is provably no looser than \eqref{eq:bounds} (push the absolute
+values inside both inner products to recover it) and strictly tighter
+under cross-component cancellation. The cost is one Gram product per
+bound query, growing with the generator count $P$. On IEEE-9
+\eqref{eq:joint} enlarges certified radii by $1.26$--$1.53\times$
+(S/M/D) at $1.3$--$3\times$ query cost; at $H{=}64$ (L) the gain drops
+to $1.05\times$ (\S\ref{sec:results}). The analogous norm-based lower
+bound never beat the componentwise form in our measurements, so
+$\score_{\lb}$ retains \eqref{eq:bounds}. A terminal Shor-SDP
+relaxation of the box-QP is the natural next rung.
 
 \subsection{Predicate alignment, and an unsoundness pattern in the wild}
 \label{sec:aliasing}
@@ -430,21 +448,24 @@ analyzed in \S\ref{sec:e4}.
 
 \begin{table}[h]
 \caption{IEEE-9: certified radius (min over frames; mean in
-parentheses) and total wall-clock. \textsc{Ibp} = our interval
+parentheses) and total wall-clock. \textsc{Zono} uses the
+componentwise bound \eqref{eq:bounds}; \textsc{Zono-J} the joint bound
+\eqref{eq:joint} on the same reach set. \textsc{Ibp} = our interval
 baseline; \textsc{Lirpa-Ibp/Crown} = auto\_LiRPA interval/backward.
-\textsc{Pgd} column is an empirical \emph{upper} bound, not a
-certificate. Timeout = 3600\,s/instance.}
+\textsc{Pgd} is an empirical \emph{upper} bound, not a certificate.
+Timeout = 3600\,s/instance.}
 \label{tab:e1}
 \begin{center}
 \small
-\begin{tabular}{llccccc}
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{llcccccc}
 \toprule
- & $(H, L)$ & \textsc{Zono} (ours) & \textsc{Ibp} & \textsc{Lirpa-Ibp} & \textsc{Crown} & \textsc{Pgd} (ub) \\
+ & $(H, L)$ & \textsc{Zono} & \textsc{Zono-J} (ours) & \textsc{Ibp} & \textsc{Lirpa-Ibp} & \textsc{Crown} & \textsc{Pgd} (ub) \\
 \midrule
-S & $(4,1)$  & \textbf{0.0128} (0.0213), 15\,s  & 0 & 0 & t/o & $\le 0.178$ \\
-M & $(16,1)$ & \textbf{0.0133} (0.0172), 53\,s  & 0 & 0 & t/o & $\le 0.115$ \\
-L & $(64,1)$ & \textbf{0.0230} (0.0281), 677\,s & 0 & 0 & t/o & $\le 0.779$ \\
-D & $(16,2)$ & \textbf{0.0228} (0.0271), 153\,s & 0 & 0 & t/o & $\le 0.368$ \\
+S & $(4,1)$  & 0.0128, 13\,s & \textbf{0.0161} (0.0273), 20\,s & 0 & 0 & t/o & $\le 0.178$ \\
+M & $(16,1)$ & 0.0133, 40\,s & \textbf{0.0204} (0.0249), 134\,s & 0 & 0 & t/o & $\le 0.115$ \\
+L & $(64,1)$ & 0.0230, 428\,s & \textbf{0.0241} (0.0301), 1758\,s & 0 & 0 & t/o & $\le 0.779$ \\
+D & $(16,2)$ & 0.0228, 111\,s & \textbf{0.0303} (0.0364), 457\,s & 0 & 0 & t/o & $\le 0.368$ \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -524,15 +545,15 @@ no masking ($\score \ge \tau$) & \textsc{Zono} & 8/8 & 8/8 & 7/8 & 7/8 \\
 \subsection{E4: Tightness and ablations}
 \label{sec:e4}
 
-\textbf{Certified-vs-empirical gap.} On IEEE-9~S the certified radius
-is $0.0128$ while PGD first violates the property at $0.178$
-($14\times$); on D, $0.0228$ vs $0.368$ ($16\times$). The gap has two
-sources: zonotope over-approximation through the recurrence, and the
-componentwise quadratic bound \eqref{eq:bounds}, whose slack was
-independently measured at $\sim\!22\%$ of the score at IEEE-9 scale.
-Tightening \eqref{eq:bounds} into a joint quadratic bound over the
-generator box is the clearest path to closing the gap and is ongoing
-work. \todo{decompose the gap: score\_ub at PGD's radius vs at the
+\textbf{Certified-vs-empirical gap.} With the componentwise bound the
+certified radius on IEEE-9~S is $0.0128$ while PGD first violates the
+property at $0.178$ ($14\times$); on D, $0.0228$ vs $0.368$
+($16\times$). The joint bound \eqref{eq:joint} closes part of this
+from the specification side ($11\times$ on S, $12\times$ on D); the
+remainder is zonotope over-approximation through the recurrence plus
+residual quadratic-bound slack. A terminal SDP relaxation and
+tighter bilinear transformers (\S\ref{sec:limitations}) target the
+rest. \todo{decompose the gap: score\_ub at PGD's radius vs at the
 certified radius}
 
 \textbf{Bisection depth.} Radius converges by $k{=}12$: on S,
