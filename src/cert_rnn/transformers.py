@@ -35,6 +35,27 @@ def _sigmoid(x):
     return 1.0 / (1.0 + np.exp(-x))
 
 
+def _fresh_block(C1: np.ndarray, C2: np.ndarray, alloc: PredAllocator):
+    """Fresh-generator block for a transformer output, with zero-width
+    pruning: elements whose exact residual spread is zero (point inputs,
+    degenerate planes) get NO fresh generator instead of a zero column.
+
+    Arithmetic-neutral: dropping all-zero columns changes no downstream
+    sum, range, or bound -- it only stops point-frames from inflating the
+    predicate count (in single_frame mode most steps are points, so this
+    collapses P and every later alignment/matmul with it).
+
+    Returns (fresh_V (K, K'), fresh_ids tuple of length K')."""
+    K = C1.shape[0]
+    width = 0.5 * (C2 - C1)
+    nz = np.flatnonzero(width != 0.0)
+    if nz.size == K:
+        return np.diag(width), alloc.next_n(K)
+    fresh_V = np.zeros((K, nz.size))
+    fresh_V[nz, np.arange(nz.size)] = width[nz]
+    return fresh_V, alloc.next_n(int(nz.size))
+
+
 # ---------- unary transformers ----------
 
 
@@ -50,9 +71,8 @@ def tanh_zono(z: Zono, allocator: PredAllocator | None = None) -> Zono:
     a, C1, C2 = _tanh_plane_1d_batch(lb, ub)
     new_c = a * z.c + 0.5 * (C1 + C2)
     scaled_V = a[:, None] * z.V if z.n_pred > 0 else np.zeros((K, 0))
-    fresh_V = np.diag(0.5 * (C2 - C1))
+    fresh_V, fresh_ids = _fresh_block(C1, C2, alloc)
     new_V = np.hstack([scaled_V, fresh_V])
-    fresh_ids = alloc.next_n(K)
     return Zono(new_c, new_V, z.pred_ids + fresh_ids)
 
 
@@ -64,9 +84,8 @@ def sigmoid_zono(z: Zono, allocator: PredAllocator | None = None) -> Zono:
     a, C1, C2 = _sigmoid_plane_1d_batch(lb, ub)
     new_c = a * z.c + 0.5 * (C1 + C2)
     scaled_V = a[:, None] * z.V if z.n_pred > 0 else np.zeros((K, 0))
-    fresh_V = np.diag(0.5 * (C2 - C1))
+    fresh_V, fresh_ids = _fresh_block(C1, C2, alloc)
     new_V = np.hstack([scaled_V, fresh_V])
-    fresh_ids = alloc.next_n(K)
     return Zono(new_c, new_V, z.pred_ids + fresh_ids)
 
 
@@ -583,9 +602,8 @@ def bilinear_sigmoid_tanh(
         A, B, C1, C2 = _sigtanh_plane_batch(lb_x, ub_x, lb_y, ub_y)
     new_c = A * z_x.c + B * z_y.c + 0.5 * (C1 + C2)
     scaled_V = A[:, None] * V_x + B[:, None] * V_y
-    fresh_V = np.diag(0.5 * (C2 - C1))
+    fresh_V, fresh_ids = _fresh_block(C1, C2, alloc)
     new_V = np.hstack([scaled_V, fresh_V])
-    fresh_ids = alloc.next_n(K)
     return Zono(new_c, new_V, shared_ids + fresh_ids)
 
 
@@ -685,9 +703,8 @@ def bilinear_sigmoid_identity(
         A, B, C1, C2 = _sigid_plane_batch(lb_x, ub_x, lb_y, ub_y)
     new_c = A * z_x.c + B * z_y.c + 0.5 * (C1 + C2)
     scaled_V = A[:, None] * V_x + B[:, None] * V_y
-    fresh_V = np.diag(0.5 * (C2 - C1))
+    fresh_V, fresh_ids = _fresh_block(C1, C2, alloc)
     new_V = np.hstack([scaled_V, fresh_V])
-    fresh_ids = alloc.next_n(K)
     return Zono(new_c, new_V, shared_ids + fresh_ids)
 
 

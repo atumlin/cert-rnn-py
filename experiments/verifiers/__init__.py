@@ -23,6 +23,12 @@ def get_verifier(name: str):
     if name == "certrnn-zono-masking":
         from experiments.verifiers.certrnn_zono import CertRnnZonoMasking
         return CertRnnZonoMasking()
+    if name == "certrnn-zono-joint":
+        from experiments.verifiers.certrnn_zono import CertRnnZonoJoint
+        return CertRnnZonoJoint()
+    if name == "certrnn-zono-joint-masking":
+        from experiments.verifiers.certrnn_zono import CertRnnZonoJointMasking
+        return CertRnnZonoJointMasking()
     if name == "interval-ibp":
         from experiments.verifiers.interval import IntervalIBP
         return IntervalIBP()

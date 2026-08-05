@@ -39,6 +39,32 @@ class CertRnnZonoMasking(BoundVerifier):
         return spec_c_score_lb(z_xh, z_x) >= case.tau
 
 
+class CertRnnZonoJoint(BoundVerifier):
+    """Same reach set as certrnn-zono, judged by the JOINT quadratic
+    score bound (cert_rnn.verify.spec_c_score_ub_joint) -- strictly
+    tighter, costs one Gram product per query."""
+
+    name = "certrnn-zono-joint"
+
+    def holds(self, case: Case, eps: float, threat_model: str,
+              t_pert: int | None) -> bool:
+        from cert_rnn.verify import spec_c_score_ub_joint
+        z_xh, z_x = lstm_ae_reach(case.encoder, case.decoder, case.head,
+                                  case.anchor, eps, threat_model, t_pert)
+        return spec_c_score_ub_joint(z_xh, z_x) <= case.tau
+
+
+class CertRnnZonoJointMasking(BoundVerifier):
+    name = "certrnn-zono-joint-masking"
+
+    def holds(self, case: Case, eps: float, threat_model: str,
+              t_pert: int | None) -> bool:
+        from cert_rnn.verify import spec_c_score_lb_joint
+        z_xh, z_x = lstm_ae_reach(case.encoder, case.decoder, case.head,
+                                  case.anchor, eps, threat_model, t_pert)
+        return spec_c_score_lb_joint(z_xh, z_x) >= case.tau
+
+
 def spec_c_score_lb(z_x_hat_seq, z_x_seq) -> float:
     """Sound LOWER bound on score(x') = ||AE(x') - x'||_2^2 / N over the
     perturbation set: per component d, |diff_d| >= max(0, lb, -ub) on its

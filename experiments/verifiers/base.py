@@ -75,6 +75,71 @@ def bisect(check, eps_init: float, n_iters: int) -> float:
     return best
 
 
+def bisect_crossing(score_at, tau: float, eps_init: float, n_iters: int
+                    ) -> tuple[float, int]:
+    """Value-guided radius search: same soundness contract as `bisect`
+    (returns the largest eps VERIFIED to satisfy score_at(eps) <= tau,
+    at granularity eps_init * 2^-n_iters), but uses the bound VALUES to
+    place queries instead of blind halving.
+
+    score_at(eps) -> sound score upper bound; monotone nondecreasing in
+    eps. Strategy: bracket by doubling/halving, then regula falsi in
+    log(score) space (the bound grows ~geometrically in eps), clamped to
+    stay inside the bracket. Every returned radius was directly verified
+    by a call with score <= tau -- the search heuristic cannot affect
+    soundness, only query count. Returns (radius, n_queries)."""
+    import math
+
+    granule = eps_init * (0.5 ** n_iters)
+    lo, lo_val = 0.0, None          # certified side (score <= tau)
+    hi, hi_val = None, None         # falsified side
+    log_tau = math.log(tau)
+    history: list[tuple[float, float]] = []   # (eps, score) evaluated
+    eps = eps_init
+    n = 0
+    while (hi is None or (hi - lo) > granule) and n < n_iters + 4:
+        s = score_at(eps)
+        n += 1
+        history.append((eps, s))
+        if s <= tau:
+            lo, lo_val = eps, s
+        else:
+            hi, hi_val = eps, s
+
+        if hi is not None and lo > 0.0:
+            # bracketed: secant on (log eps, log score), clamped inside
+            le_lo, ls_lo = math.log(lo), math.log(max(lo_val, 1e-300))
+            le_hi, ls_hi = math.log(hi), math.log(hi_val)
+            if ls_hi - ls_lo > 1e-12:
+                le = le_lo + (log_tau - ls_lo) * (le_hi - le_lo) / (ls_hi - ls_lo)
+                eps_new = math.exp(le)
+            else:
+                eps_new = 0.5 * (lo + hi)
+            margin = max(granule, 0.05 * (hi - lo))
+            eps = min(max(eps_new, lo + margin), hi - margin) \
+                if hi - lo > 2 * margin else 0.5 * (lo + hi)
+        elif hi is not None:
+            # no certified point yet: extrapolate the crossing from the
+            # last two scores in log-log space instead of blind halving
+            if len(history) >= 2 and history[-2][1] > 0 and s > 0:
+                (e1, s1), (e2, s2) = history[-2], history[-1]
+                d = math.log(s2) - math.log(s1)
+                if abs(d) > 1e-12 and e1 != e2:
+                    le = math.log(e2) + (log_tau - math.log(s2)) \
+                        * (math.log(e2) - math.log(e1)) / d
+                    eps = min(max(math.exp(le), granule), hi * 0.75)
+                else:
+                    eps = hi / 2.0
+            else:
+                eps = hi / 2.0
+            if eps < granule:
+                break
+        else:
+            # no falsified point yet: certified at eps_init, grow
+            eps = 2.0 * eps
+    return lo, n
+
+
 class BoundVerifier:
     """Base for sound lower-bound tools. Subclasses set `name` and
     implement holds()."""

@@ -219,6 +219,77 @@ def spec_c_score_ub(z_x_hat_seq: list[Zono], z_x_seq: list[Zono]) -> float:
     return score_ub / N
 
 
+def _stack_residuals(z_x_hat_seq: list[Zono], z_x_seq: list[Zono]):
+    """Residual zonotopes AE(x')-x' per step, stacked into the union
+    predicate space. Returns (c, V) with c: (N,), V: (N, P)."""
+    if len(z_x_hat_seq) != len(z_x_seq):
+        raise ValueError("z_x_hat_seq and z_x_seq must have the same length")
+    diffs = [zono_sub(a, b) for a, b in zip(z_x_hat_seq, z_x_seq)]
+    all_ids: dict = {}
+    for d in diffs:
+        for pid in d.pred_ids:
+            if pid not in all_ids:
+                all_ids[pid] = len(all_ids)
+    N = sum(d.dim for d in diffs)
+    c = np.concatenate([d.c for d in diffs])
+    V = np.zeros((N, len(all_ids)))
+    row = 0
+    for d in diffs:
+        V[row:row + d.dim, [all_ids[p] for p in d.pred_ids]] = d.V
+        row += d.dim
+    return c, V
+
+
+def spec_c_score_ub_joint(z_x_hat_seq: list[Zono], z_x_seq: list[Zono]) -> float:
+    """Tighter sound upper bound on score(x') over the perturbation set,
+    exploiting that every residual component shares the SAME generator
+    vector alpha:
+
+        max_{alpha in [-1,1]^P} ||c + V alpha||^2
+          <= ||c||^2 + 2 ||V^T c||_1 + sum_{ij} |(V^T V)_{ij}|
+
+    Provably <= the componentwise bound of spec_c_score_ub (push the
+    absolute values inside both inner products to recover it), strictly
+    tighter whenever cancellation exists across components. Cost: one
+    (P x N) @ (N x P) Gram product -- grows with the generator count P,
+    so the componentwise bound remains the cheap default; `certify` /
+    suite adapters select via score_bound="joint".
+    """
+    T = len(z_x_hat_seq)
+    if T == 0:
+        return 0.0
+    N = T * z_x_hat_seq[0].dim
+    c, V = _stack_residuals(z_x_hat_seq, z_x_seq)
+    M = V.T @ V
+    ub = float(c @ c) + 2.0 * float(np.abs(V.T @ c).sum()) + float(np.abs(M).sum())
+    # The componentwise bound can win only by fp noise; take the min --
+    # both are sound.
+    return min(ub / N, spec_c_score_ub(z_x_hat_seq, z_x_seq))
+
+
+def spec_c_score_lb_joint(z_x_hat_seq: list[Zono], z_x_seq: list[Zono]) -> float:
+    """Tighter sound LOWER bound on score(x') over the perturbation set
+    (the masking property's certificate):
+
+        min_alpha ||c + V alpha||_2 >= ||c||_2 - max_alpha ||V alpha||_2
+                                    >= ||c||_2 - sqrt(sum_{ij} |(V^T V)_{ij}|)
+
+    combined (max) with the componentwise lower bound -- neither
+    dominates, both are sound."""
+    T = len(z_x_hat_seq)
+    if T == 0:
+        return 0.0
+    N = T * z_x_hat_seq[0].dim
+    c, V = _stack_residuals(z_x_hat_seq, z_x_seq)
+    M = V.T @ V
+    norm_lb = max(0.0, float(np.linalg.norm(c)) - float(np.sqrt(np.abs(M).sum())))
+    # componentwise lower bound: per component |diff_d| >= max(0, lb, -ub)
+    radius = np.abs(V).sum(axis=1)
+    comp_min = np.maximum(0.0, np.maximum(c - radius, -(c + radius)))
+    comp_lb = float(np.sum(comp_min ** 2))
+    return max(norm_lb ** 2, comp_lb) / N
+
+
 def spec_c_holds(
     encoder: dict,
     decoder: dict,
