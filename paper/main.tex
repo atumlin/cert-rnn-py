@@ -208,10 +208,17 @@ been adapted to time-series anomaly detection under DTW perturbations
 \citep{liu2026dtw}. Our certificates are deterministic and exact with
 respect to the $\ell_\infty$ threat model: no sampling failure
 probability, and both directions (false alarm and masking) of the
-detector are covered. Deterministic certification of \emph{feedforward}
-autoencoder reconstruction appears in reachability analyses of
-individual case studies, but we know of no general tool or systematic
-evaluation for the recurrent case.
+detector are covered. For \emph{feedforward} models,
+\citet{guidotti2024ae} verify autoencoder-based anomaly detection in a
+predictive-maintenance setting, \citet{bethune2023ocsdf} obtain exact
+certificates for 1-Lipschitz distance-based one-class classifiers
+(introducing certified-AUROC-style metrics), and IBP-certified OOD
+detectors bound classifier confidence \citep{bitterwolf2020good}. None
+addresses the recurrent case, and empirical concealment attacks on
+exactly our detector class are well documented
+\citep{erba2020concealment}. We therefore scope our claim precisely:
+the first \emph{deterministic} certification of a \emph{recurrent}
+(LSTM) autoencoder's reconstruction-error score, in both directions.
 
 \textbf{Anomaly detection in power systems.} LSTM autoencoders are a
 standard detector for PMU/bus telemetry
