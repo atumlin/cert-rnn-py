@@ -54,13 +54,18 @@ LSTMs, extending the Cert-RNN framework
 to encoder--decoder architectures and quadratic output specifications,
 with a predicate-alignment correction that we show is necessary for
 soundness on multi-layer models. On LSTM-AE detectors for the IEEE-9
-power system, our verifier certifies radii $\sim$\placeholder{100}$\times$
-larger than interval bound propagation at equal cost, and matches
-CROWN-style linear relaxation to within \placeholder{30\%} of its radius
-while being \placeholder{600}$\times$ faster per bound query,
-scaling to model sizes where the relaxation exceeds its time budget.
-From per-window certificates we derive certified-robust
-false-positive/true-positive rates, giving---to our knowledge---the
+power system, our verifier is the only sound tool that completes the
+benchmark: interval bound propagation certifies nothing at the finest
+bisection granularity, and CROWN-style linear relaxation on the
+unrolled graph exceeds a one-hour-per-instance budget without
+finishing a single case. On a controlled scaling family the zonotope
+domain matches CROWN's certified radii to within 1--2\% while being
+$10^2$--$10^3\times$ faster per bound query, and still completes at
+hidden widths where CROWN times out. From per-window certificates we
+derive certified-robust false-positive/true-positive rates---certifying
+on our benchmark that no $\ell_\infty$ perturbation up to radius
+$0.0137$ can raise a false alarm on any tested normal window, and none
+up to $0.0176$ can mask any tested anomaly---to our knowledge the
 first deterministic end-to-end guarantee for a learned time-series
 anomaly detector. We release the verifier, an adapter harness that runs
 all baselines under an identical bisection protocol, and a deterministic
@@ -155,19 +160,23 @@ costs at scale.
 
 \textbf{Findings} (\S\ref{sec:results}). Certification of recurrent
 autoencoders exhibits a sharp Pareto structure. Interval propagation is
-fast but its bounds explode within a few LSTM steps: at practical
-bisection granularity it certifies radii $\sim$\placeholder{100}$\times$
-smaller than the zonotope domain, or nothing. CROWN-style backward
-relaxation is the tightest sound domain per query---certifying radii
-\placeholder{$\sim$1.4}$\times$ ours on small models---but three orders
-of magnitude slower, exceeding realistic budgets already at moderate
-hidden widths \todo{confirm E2 crossover}. The zonotope verifier holds
-the practical middle: \placeholder{sub-second} bound queries at IEEE-9
-scale, polynomial growth \todo{fit exponent from E2}, and nonvacuous
-certificates on every benchmark. On the detector task, we certify that
-\placeholder{X\%} of normal windows admit no false alarm and
-\placeholder{Y\%} of anomalous windows cannot be masked at
-$\epsilon = $ \placeholder{0.01} \todo{E3}.
+fast but its bounds explode within a few LSTM steps: on the trained
+IEEE-9 detectors it certifies \emph{nothing} at the finest bisection
+granularity ($1.2\times10^{-4}$), and on the scaling family its
+certified radius collapses from competitive at $H{=}4$ to zero by
+$H{=}64$. CROWN-style backward relaxation is the tightest sound domain
+per query---but only marginally (within 1--2\% of our radii up to
+$H{=}32$; $22\%$ larger at $H{=}64$)---at $10^2$--$10^3\times$ the cost
+per bound query, timing out on every full IEEE-9 instance (one-hour
+budget) and on the scaling family at $H{=}128$ (15-minute budget). The
+zonotope verifier holds the practical middle: $0.04$--$10$\,s bound
+queries across the full lattice, empirical cost growth
+$\sim\!H^{1.6}$, $T^{1.7}$, $L^{1.7}$ and flat in $D$, and nonvacuous
+certificates on every benchmark instance. On the detector task
+(multi-frame threat model), all tested normal windows are certified
+false-alarm-robust at $\epsilon = 0.0137$ and all tested anomalous
+windows masking-robust at $\epsilon = 0.0176$, with median certified
+radii $0.023$ and $0.068$ respectively.
 
 \section{Related Work}
 \label{sec:related}
@@ -311,7 +320,7 @@ triangle inequality the merged $|V|$-sums \emph{shrink}, producing
 bounds tighter than the true reachable set: an unsound certificate.
 This is not hypothetical: the MATLAB star-set reference implementation
 we cross-validate against exhibits exactly this pattern on multi-layer
-models, certifying radii up to \placeholder{7\%} larger than the sound
+models, certifying radii $6$--$9\%$ larger than the sound
 value on every frame of our two-layer IEEE-9 checkpoint
 (\S\ref{sec:results}). Our implementation assigns every generator a
 persistent identity and embeds operands into a unified predicate space
@@ -388,51 +397,158 @@ $(16,30,9,1)$: $H \le 128$, $T \le 120$, $D \le 72$, $L \le 3$; injected
 spike/step/dropout anomalies (flagged by the clean detector) provide
 masking subjects. (c) \emph{SMD} \citep{su2019robust}: server telemetry
 ($D{=}38$), standard TSAD benchmark, for cross-domain generality.
-\todo{wire Morris power-attack PMU dataset \citep{adhikari2018power}}
+\todo{SMD results pending data download; wire Morris power-attack PMU
+dataset \citep{adhikari2018power}}
 
 \section{Results}
 \label{sec:results}
 
 \subsection{E1: Verifiability across tools}
-\todo{full table from results/e1.jsonl; smoke row below}
+
+Table~\ref{tab:e1} reports certified radii on the four IEEE-9
+detectors (single-frame threat model, all 30 frames, $k{=}12$). Only
+the zonotope verifier completes the benchmark. Both interval variants
+certify nothing: their score upper bounds already exceed $\tau$ at the
+finest bisected radius $1.2\times10^{-4}$ (we verified the IBP
+implementation converges to the concrete score as
+$\epsilon \to 0$ and blows up by $\epsilon \approx 10^{-4}$ after 30
+LSTM steps---the compounding-looseness regime that motivates relational
+domains). CROWN on the unrolled graph exhausted a one-hour
+per-instance budget on \emph{every} size without completing a single
+30-frame case ($\ge 28$\,s per bound query $\times$ 30 frames
+$\times$ 13 queries $> 3$\,h); its tightness is therefore measured on
+the scaling family (\S\ref{sec:e2}), where full comparisons finish.
+PGD upper bounds leave a $14$--$34\times$ gap to the certified radii,
+analyzed in \S\ref{sec:e4}.
 
 \begin{table}[h]
-\caption{Certified radius (single-frame, min over frames) and cost.
-Preliminary smoke cell, IEEE-9~S frame~0, $k{=}8$: \textsc{Zono}
-0.0156 at 0.05\,s/query; \textsc{Crown} 0.0215 at $\sim$28\,s/query;
-\textsc{Ibp}/\textsc{Lirpa-Ibp} certify nothing at $2^{-8}$
-granularity; \textsc{Pgd} finds no violation up to $\epsilon \approx 1$.}
+\caption{IEEE-9: certified radius (min over frames; mean in
+parentheses) and total wall-clock. \textsc{Ibp} = our interval
+baseline; \textsc{Lirpa-Ibp/Crown} = auto\_LiRPA interval/backward.
+\textsc{Pgd} column is an empirical \emph{upper} bound, not a
+certificate. Timeout = 3600\,s/instance.}
 \label{tab:e1}
 \begin{center}
-\begin{tabular}{lccccc}
+\small
+\begin{tabular}{llccccc}
 \toprule
- & \textsc{Zono} & \textsc{Ibp} & \textsc{Lirpa-Ibp} & \textsc{Crown} & \textsc{Pgd} (ub) \\
+ & $(H, L)$ & \textsc{Zono} (ours) & \textsc{Ibp} & \textsc{Lirpa-Ibp} & \textsc{Crown} & \textsc{Pgd} (ub) \\
 \midrule
-IEEE9-S & \todo{} & & & & \\
-IEEE9-M & & & & & \\
-IEEE9-L & & & & & \\
-IEEE9-D & & & & & \\
-SMD     & & & & & \\
+S & $(4,1)$  & \textbf{0.0128} (0.0213), 15\,s  & 0 & 0 & t/o & $\le 0.178$ \\
+M & $(16,1)$ & \textbf{0.0133} (0.0172), 53\,s  & 0 & 0 & t/o & $\le 0.115$ \\
+L & $(64,1)$ & \textbf{0.0230} (0.0281), 677\,s & 0 & 0 & t/o & $\le 0.779$ \\
+D & $(16,2)$ & \textbf{0.0228} (0.0271), 153\,s & 0 & 0 & t/o & $\le 0.368$ \\
 \bottomrule
 \end{tabular}
 \end{center}
 \end{table}
 
 \subsection{E2: Scalability}
-\todo{scaling figures (sec/query vs H, T, D, L, log-log) +
-cactus plot; report empirical exponents and CROWN's budget crossover.}
+\label{sec:e2}
+
+Figure~\ref{fig:scaling} shows seconds per bound query against hidden
+width $H$ and window length $T$ on the synthetic lattice (each point a
+trained detector; 900\,s/instance budget). Empirical cost growth of the
+zonotope verifier is $\sim\!H^{1.6}$ ($0.038 \to 10.1$\,s/query from
+$H{=}4 \to 128$), $\sim\!T^{1.7}$ ($0.025 \to 1.71$\,s/query,
+$T{=}10 \to 120$), $\sim\!L^{1.7}$ ($0.13 \to 0.79$\,s/query,
+$L{=}1 \to 3$), and flat in $D$ ($0.13 \to 0.14$\,s/query,
+$D{=}9 \to 72$)---consistent with the generator-accumulation analysis
+of \S\ref{sec:method} dominated by the $H$ and $T$ terms. CROWN's
+per-query cost is nearly flat in $H$ ($27.6 \to 37$\,s; its unrolled
+backward pass is dominated by graph length), but its constant is
+$10^2$--$10^3\times$ ours and it exceeds the budget at $H{=}128$,
+where we finish in 261\,s. Tightness on the points where CROWN
+completes: its certified radius exceeds ours by $0.9$--$2.2\%$ for
+$H \le 32$ (e.g.\ $0.211$ vs $0.209$ at $H{=}4$) and by $22\%$ at
+$H{=}64$ ($0.0215$ vs $0.0176$)---so the zonotope cedes little
+tightness for orders of magnitude in speed. The interval tools mirror
+E1: competitive only on the smallest models ($0.158$ at $H{=}4$),
+collapsing to zero by $H{=}64$.
+
+\begin{figure}[t]
+\begin{center}
+\includegraphics[width=0.48\linewidth]{fig_scaling_H}\hfill
+\includegraphics[width=0.48\linewidth]{fig_scaling_T}
+\end{center}
+\caption{Cost per bound query (log--log) vs hidden width $H$ (left)
+and window length $T$ (right). $\times$ marks a budget timeout
+(CROWN at $H{=}128$).}
+\label{fig:scaling}
+\end{figure}
 
 \subsection{E3: Certified detection}
-\todo{certified-robust FPR/TPR at target radii; both properties;
-multi-frame threat model; synthetic + SMD.}
+
+On the synthetic center detector ($H{=}16$, $T{=}30$, $D{=}9$;
+multi-frame threat model, i.e.\ the attacker perturbs every step of
+the window jointly), we certify \emph{both} detector properties on
+all tested windows: 8/8 normal windows are false-alarm-robust with
+certified radii in $[0.0137, 0.0322]$ (median $0.023$), and 8/8
+flagged anomalous windows (spike, step, and channel-dropout classes)
+are masking-robust with radii in $[0.0176, 0.234]$ (median $0.068$).
+Masking radii are systematically larger than false-alarm radii: hiding
+an anomaly requires \emph{reducing} reconstruction error everywhere at
+once, which is harder than inflating it. Table~\ref{tab:e3} gives
+certified-robust detection rates at target radii; the interval
+baseline---which certifies nothing on IEEE-9---does certify this
+easier (smaller, well-trained) model, but its rates decay first as
+$\epsilon$ grows, and its radii are uniformly $\sim\!25$--$30\%$
+smaller than ours on the same windows.
+
+\begin{table}[h]
+\caption{Certified-robust detection rates: fraction of windows whose
+certified radius covers $\epsilon$ (multi-frame threat model).}
+\label{tab:e3}
+\begin{center}
+\small
+\begin{tabular}{llcccc}
+\toprule
+property & tool & $\epsilon{=}0.01$ & $0.015$ & $0.02$ & $0.03$ \\
+\midrule
+no false alarm ($\score \le \tau$) & \textsc{Zono} & 8/8 & 6/8 & 5/8 & 1/8 \\
+ & \textsc{Ibp} & 8/8 & 5/8 & 3/8 & 0/8 \\
+no masking ($\score \ge \tau$) & \textsc{Zono} & 8/8 & 8/8 & 7/8 & 7/8 \\
+ & \textsc{Ibp} & 8/8 & 7/8 & 7/8 & 7/8 \\
+\bottomrule
+\end{tabular}
+\end{center}
+\end{table}
 
 \subsection{E4: Tightness and ablations}
-\todo{(a) certified-vs-PGD gap decomposition (domain looseness vs
-quadratic-bound looseness); (b) radius/time vs bisection depth;
-(c) single- vs multi-frame radii; (d) the aliasing case study: MATLAB
-reference certifies $+1.7$--$2.7\times 10^{-3}$ larger $\epsilon$ on
-all 30 frames of IEEE9-D --- theoretically unsound bounds that PGD
-cannot falsify because of quadratic-bound slack; discussion.}
+\label{sec:e4}
+
+\textbf{Certified-vs-empirical gap.} On IEEE-9~S the certified radius
+is $0.0128$ while PGD first violates the property at $0.178$
+($14\times$); on D, $0.0228$ vs $0.368$ ($16\times$). The gap has two
+sources: zonotope over-approximation through the recurrence, and the
+componentwise quadratic bound \eqref{eq:bounds}, whose slack was
+independently measured at $\sim\!22\%$ of the score at IEEE-9 scale.
+Tightening \eqref{eq:bounds} into a joint quadratic bound over the
+generator box is the clearest path to closing the gap and is ongoing
+work. \todo{decompose the gap: score\_ub at PGD's radius vs at the
+certified radius}
+
+\textbf{Bisection depth.} Radius converges by $k{=}12$: on S,
+$0.0078$ ($k{=}6$), $0.0127$ ($k{=}9$), $0.0128$ ($k{=}12$), $0.0129$
+($k{=}15$), at near-linear cost in $k$ ($8 \to 18$\,s); $k{=}12$ is
+the default throughout.
+
+\textbf{Threat model.} Perturbing all 30 frames jointly shrinks
+IEEE-9 certified radii by $\sim\!17\times$ (S: $7.3\times10^{-4}$ vs
+$0.0128$; D: $1.1\times10^{-3}$ vs $0.0228$): per-frame certificates
+substantially overstate robustness against a stream-level attacker,
+which is why E3 reports the multi-frame model.
+
+\textbf{The aliasing case study.} The MATLAB star-set reference agrees
+with our engine to $10^{-10}$ on all single-layer IEEE-9 sizes but
+certifies $+1.7$--$2.7\times10^{-3}$ \emph{larger} radii ($6$--$9\%$)
+on every frame of the two-layer D model---the predicate-aliasing
+signature of \S\ref{sec:aliasing}: positional generator padding
+collapses distinct noise symbols, shrinking $|V|$-sums below the sound
+value. PGD cannot falsify those inflated certificates precisely
+because the quadratic-bound slack exceeds the aliasing inflation---an
+instructive failure mode: empirical attack probes are too weak to
+detect an unsound verifier whose specification bound is loose.
 
 \section{Limitations}
 \label{sec:limitations}

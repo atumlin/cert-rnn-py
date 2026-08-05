@@ -46,4 +46,4 @@ paper/*.log
 paper/*.out
 paper/*.bbl
 paper/*.blg
-paper/*.pdf
+paper/main.pdf
