@@ -1,160 +1,177 @@
 # Certifying an LSTM Autoencoder Anomaly Detector on PMU Data
 
-*How formal verification concepts (perturbations, frames, radii, specifications)
-map onto the windowed-PMU anomaly-detection pipeline. Running example: a
-2+2-layer LSTM-AE with hidden size H=55 on windows of shape (64, 1),
-τ = 0.0545 chosen at the 95th percentile of validation scores.*
+*How formal verification concepts (perturbations, frames, radii,
+specifications) map onto the windowed-PMU anomaly-detection pipeline of
+`lstm_ae_model_example.ipynb`. Running example: a 2+2-layer LSTM-AE with
+hidden size H=55 on inputs of shape (64, 1).*
+
+> **Revision note.** An earlier version of this document assumed each input
+> was 64 consecutive *timestamps* of one channel. Inspection of the actual
+> data pipeline (`create_dataset`) shows otherwise — each input is one
+> timestamp's vector of 64 *features*. Everything below reflects the real
+> pipeline.
 
 ---
 
-## 1. From PMU stream to model input: what a "window" is
+## 1. From CSV to model input: what an input "sequence" really is
 
-The raw data is a time series: PMU measurements sampled at consecutive
-timestamps. The autoencoder never sees the raw stream; it sees **sliding
-windows** cut from it. One window is a matrix
+The dataset rows are **per-timestamp snapshots**: each row of the zoneA CSV
+holds the values of 64 SubFeature columns (PMU-derived quantities across the
+zone) measured at one timestamp. The shaping code is:
 
-> **x ∈ ℝ^(T×D)** with **T = 64** rows and **D = 1** column,
+```python
+sequences = df.astype(np.float32).to_numpy().tolist()          # one element per ROW
+dataset  = [torch.tensor(s).unsqueeze(1).float() for s in sequences]  # (64,) -> (64, 1)
+```
 
-i.e., 64 consecutive timestamps of **one** measurement channel. The "weird
-shape" (64, 1) is nothing deeper than that: row index = position in time
-within the window, column index = which measured quantity (here there is
-only one). The batch dimension (3256, 64, 1) exists only for training
-throughput; verification always concerns **one window at a time**.
+So one model input **x ∈ ℝ^(64×1)** is a single row — one timestamp — with
+its 64 feature values laid out along the "sequence" axis:
 
-**Frames ≡ timestamps.** In the tool's vocabulary, "frame t" is row t of the
-window — the measurement taken at the t-th timestamp of the window. There is
-no other meaning. With D = 1, a frame holds a single scalar reading.
+> **frame t = the t-th SubFeature column of one snapshot, NOT the t-th
+> timestamp.** The "time" axis the LSTM iterates over is really the *feature
+> index*; D = 1 because each "step" carries exactly one feature's scalar
+> value.
+
+The LSTM therefore reads the snapshot feature-by-feature in column order,
+carrying a running 55-dimensional summary — a *feature-as-sequence*
+autoencoder. This is a legitimate and common construction (the model learns
+the joint structure/correlations of the feature vector; the fixed column
+order plays the role time normally does), but it changes every domain
+interpretation below. Temporal context across timestamps is **not** part of
+one input; consecutive inputs are independent snapshots (the dataframe is
+even shuffled before splitting).
+
+Values are MinMax-scaled per column, with the scaler **fit on normal rows
+only** — so each feature lives in ≈[0, 1], and each feature has its *own*
+physical scale factor (see §6).
 
 ## 2. What the detector computes
 
-The encoder compresses the window into a latent vector (the final top-layer
-hidden state, ℝ^55); the decoder, fed that latent at every step, reproduces a
-64-step reconstruction; a linear head maps each decoder state back to
-measurement space. The anomaly score is the mean squared reconstruction error
+Encoder (two stacked LSTMs, 55 units; the dropout module between them is
+identity at inference) compresses the 64-feature snapshot into a latent
+vector ℝ^55; the decoder receives that latent at every step and, through a
+per-step linear head, reproduces a 64-value reconstruction x̂. The anomaly
+score is
 
-> score(x) = (1/64) · Σₜ ( x̂ₜ − xₜ )²,
+> score(x) = (1/64) · Σₜ ( x̂ₜ − xₜ )²  — mean squared error over the 64 features,
 
-and the deployed rule is: **score(x) > τ ⇒ raise an anomaly alarm**. The
-threshold τ = 0.0545 was set so that ~95% of normal validation windows fall
-below it.
+and the deployed rule is **score(x) > τ ⇒ anomaly alarm**. Note the deployed
+threshold in the notebook is `THRESHOLD = np.percentile(train losses, 99)`.
+(The verification cell recomputed a 95th-percentile-of-validation τ; for
+certificates about the *deployed* detector, use the deployed `THRESHOLD` —
+see §7.)
 
-## 3. The specification: what property is being proven
+## 3. The specification being proven
 
-Verification here does **not** ask "is the model accurate?" It asks a
-robustness question about the *alarm decision* on a specific, known-normal
-window (the **anchor**):
+For a chosen, known-normal snapshot (the **anchor**):
 
-> **Spec (false-alarm robustness).** For every window x′ in a perturbation
-> set B(x, ε) around the anchor x: score(x′) ≤ τ.
+> **Spec (false-alarm robustness).** For every x′ in the perturbation set
+> B(x, ε): score(x′) ≤ τ.
 
-In words: *no perturbation within the set can trick the detector into a
-false alarm on this normal window.* The proof covers **every** point of the
-set — including the single worst one — not a sample of them. (The mirror-image
-property, "no perturbation can mask a true anomaly below τ," is the same
-machinery with the inequality flipped and an anomalous anchor; the shipped
-spec is the false-alarm direction.)
+In words: *no allowed corruption of this snapshot's measurements can trick
+the detector into a false alarm* — proven for **every** point of the set,
+worst case included, not a sample.
 
-## 4. What a perturbation is, concretely
+## 4. What a perturbation is, in domain terms
 
-A perturbation **changes measurement values, never timestamps**. Time
-positions, window length, and sampling are fixed; what varies is the recorded
-number at a timestamp. "Perturb frame t by up to ε" means: replace the reading
-xₜ with any value in the interval [xₜ − ε, xₜ + ε]. Since D = 1, that is one
-scalar per frame.
+A perturbation changes **measured values of the snapshot**, one per frame.
+"Perturb frame t by up to ε" = replace SubFeature t's value with anything in
+[xₜ − ε, xₜ + ε] (normalized units). The two threat models:
 
-Physical readings of "the reading is off by at most ε": sensor noise and
-calibration error, quantization, a transient communication glitch, or an
-adversary with bounded ability to skew a measurement. **Units caveat:** ε
-lives in the *normalized* units the model was trained on. To state a result
-in physical units (volts, Hz, per-unit), multiply by the scale factor your
-preprocessing applied to that channel.
+- **single_frame** — exactly **one SubFeature** of the snapshot is corrupted;
+  the other 63 keep their recorded values. Domain reading: one bad sensor
+  channel, one spoofed measurement, a single mis-registered quantity. The
+  tool certifies each of the 64 features separately, yielding a **per-feature
+  robustness profile** — which measured quantity most easily flips the alarm.
+- **multi_frame** — **all 64 SubFeatures corrupted simultaneously**, each
+  within ±ε, jointly worst-case. Domain reading: the entire measurement
+  vector is noisy or adversarially skewed at once — bounded sensor noise
+  across the zone, or a coordinated data-integrity attack on the snapshot.
 
-Two threat models fix *which* frames may move:
+Because a "window" is one timestamp, *both* threat models describe
+corruption of a single instant's measurements; neither involves shifting or
+perturbing anything across time.
 
-- **single_frame** — exactly one timestamp's reading is corrupted; the other
-  63 stay exactly as recorded. The tool certifies each frame separately and
-  reports the per-frame radii and their minimum. Models: one bad sample, a
-  single spoofed packet.
-- **multi_frame** — all 64 readings are corrupted **simultaneously and
-  independently**, each by up to ε, in the jointly worst way. Models: bounded
-  noise on the whole channel, a sustained low-amplitude attack. Every
-  single_frame set is contained in the multi_frame set, so the multi_frame
-  radius is always the smaller of the two.
+## 5. The certified radius, and the single_frame dilution effect
 
-## 5. The certified radius, and why single_frame radii look huge
+The **certified radius** is the largest ε for which the spec was proven
+(bisection: try, prove/fail, halve, repeat). Below it: provably no false
+alarm. Above it: unknown (the method is conservative — the radius is a
+*floor* on true robustness, never an overestimate).
 
-The **certified radius** is the largest ε for which the spec was *proven*
-(found by bisection: try an ε, prove or fail, halve the step, repeat). Read
-it as: "any perturbation smaller than this provably cannot cause a false
-alarm on this window."
+Expect single_frame radii to be **large**, and don't read that as a bug. The
+score averages 64 squared errors, so one corrupted feature is diluted 64×:
+with τ = 0.0545 and anchor score 0.0209, the spare budget is
+64 × 0.0336 ≈ 2.15 of squared error in the one perturbed element — tolerating
+a reconstruction error of ≈1.47 there, on features that live in [0, 1]. A
+certified value of 0.999878 is exactly the bisection's ceiling (1 − 2⁻¹³
+with defaults), i.e. *every ε tried was certified*; report it as **ε ≥ 1**:
+"no single corrupted SubFeature — over its entire physical range — can cause
+a false alarm on this snapshot." A strong, true, and reportable property of
+an averaging detector.
 
-Expect a large asymmetry between the threat models, and do not be alarmed by
-it. The score is a **mean over 64 values**, so a single corrupted sample is
-diluted 64-fold. With τ = 0.0545 and anchor score 0.0209 the spare budget is
-0.0336 in mean-squared terms — i.e. 64 × 0.0336 ≈ 2.15 of squared error
-available to the one perturbed element, tolerating a reconstruction error of
-≈ 1.47 there. A ±1 change in one normalized reading simply cannot move the
-average past τ unless the network amplifies it across the window — and LSTMs
-attenuate rather than amplify single-input influence. Hence single-frame
-radii near or beyond 1 are *mathematically expected*, and a result of
-0.999878 is literally the search's ceiling (1 − 2⁻¹³ with the default
-bisection), meaning "everything tried was certified." The honest headline for
-such a result: **no single corrupted sample within the data's realistic range
-can cause a false alarm on this window.**
+The **multi_frame radius is the discriminative number**: with all 64
+features perturbed at once the errors add rather than dilute, and the radius
+lands at a finite, informative value. Report the pair: immune to
+single-channel corruption; quantified tolerance to vector-wide corruption.
 
-The **multi_frame radius is the discriminative number**: with all 64 readings
-adversarially perturbed, errors add instead of dilute, and the radius lands
-at a finite, informative value (typically orders of magnitude smaller). The
-pair together tells the real story — robust to point corruption; quantified
-sensitivity to coordinated or broadband perturbation.
+## 6. Translating ε back to physical units
 
-## 6. What the proof engine does (one paragraph)
+ε is uniform in *normalized* units, but MinMax scaling gives every feature
+its own physical range, so one normalized ε means a different physical
+magnitude per feature:
 
-The tool pushes the entire *set* of perturbed windows through the network at
-once, representing it as a zonotope (a center plus symbolic noise terms) and
-soundly over-approximating each LSTM nonlinearity. Out the far end comes a
-guaranteed **upper bound** on the score over the whole set; if that bound is
-≤ τ, the spec is proven at that ε. Two consequences: (i) **soundness** — a
-certificate is a real theorem about the model, covering the worst case;
-(ii) **incompleteness** — a *failed* check does not prove an attack exists,
-because the bound is conservative. The certified radius is therefore a
-*floor* on the true robustness, never an overestimate of it.
+```python
+phys_eps_per_feature = eps * scaler.data_range_   # array of 64 physical spans
+```
 
-## 7. Reporting checklist
+For single_frame results this is natural (each frame's radius maps through
+its own feature's range). For multi_frame, state it as "each SubFeature
+simultaneously off by up to ε of its observed normal range."
 
-A complete result for one window states: the anchor (which window, its
-score), τ and how it was chosen, the threat model, the certified radius in
-normalized *and* physical units, the bisection settings (they bound the
-search range — report saturation as "≥ ceiling", not as the number), and
-ideally a tightness estimate (certified bound vs. empirical worst case) so
-readers can judge the conservatism. Template sentence:
+## 7. Faithfulness of the verification to the deployed model
 
-> "For validation window #1424 (score 0.021, τ = 0.055), we certify that no
-> simultaneous perturbation of all 64 measurements by less than ε* in
-> normalized units (≙ … in physical units) can raise a false alarm
-> (multi_frame). Under the single-measurement threat model the certificate
-> saturates the search range (ε ≥ 1), i.e., no single corrupted reading can
-> cause a false alarm."
+Three facts established by direct testing against the notebook's verbatim
+legacy classes:
+
+1. **Conversion parity holds.** The cert-rnn model reproduces the legacy
+   model's reconstruction to ~1e-9 at batch size 1 (the preflight `torch
+   parity` check). The dropout module is identity in eval mode and correctly
+   absent from the converted model; the encoder's final rnn2 hidden state is
+   exactly the latent the tool assumes; the decoder's `repeat` feeds that
+   latent at every step for B=1, matching the tool's topology.
+2. **B=1 is the deployed semantics.** The notebook's `predict()` scores
+   samples one at a time, and the threshold was computed from B=1 losses —
+   and verification is inherently B=1. (Observation, no action needed: the
+   legacy decoder's `x.repeat(seq_len, n_features).reshape(...)` interleaves
+   latents *across* samples when B>1, so batched training saw slightly
+   scrambled decoder inputs. This affects what the weights are, not the
+   correctness of certifying the resulting B=1 function.)
+3. **τ alignment matters.** Certificates are statements "score stays ≤ τ."
+   The deployed alarm uses `THRESHOLD` (99th percentile of train losses);
+   a certificate against a different τ (e.g. 95th percentile of validation
+   scores) is about a *different detector*. Use `tau=THRESHOLD` in the
+   verification cell for deployment-relevant results.
 
 ---
 
 ## Condensed version
 
-- **A window = 64 consecutive timestamps × 1 measurement channel.**
-  Frame t = the reading at timestamp t. With D = 1, one frame = one scalar.
-- **The property proven (Spec C):** for a chosen normal window, *no*
-  perturbation within size ε can push the reconstruction score above τ —
-  i.e., no false alarm, for every perturbation in the set, worst case included.
-- **A perturbation changes values, not time:** reading xₜ may move anywhere
-  in [xₜ−ε, xₜ+ε], in the model's normalized units.
-- **single_frame:** one timestamp corrupted, rest exact; certified per frame;
-  min over frames is the headline. **multi_frame:** all 64 corrupted at once;
-  always a smaller radius; usually the informative one.
-- **Certified radius:** the largest ε *proven* safe — a guaranteed floor on
-  robustness (conservative, never optimistic).
-- **Huge single_frame radii are expected, not a bug:** the score averages 64
-  terms, so one sample is diluted 64×; 0.999878 is the bisection's ceiling
-  (1 − 2⁻¹³), meaning "certified at everything tried." Report it as ε ≥ 1.
-- **Report both radii + units translation:** point-corruption immunity
-  (single_frame) and quantified noise tolerance (multi_frame), with ε mapped
-  back to physical units via your normalization.
+- **One input = one timestamp's snapshot of 64 SubFeatures** (one CSV row),
+  reshaped to (64, 1). **Frame t = SubFeature t — features, not timestamps.**
+  The LSTM reads the feature vector in column order as a pseudo-sequence.
+- **Spec proven:** no perturbation of the snapshot's measurements within ε
+  can push the reconstruction score above τ → no false alarm, worst case
+  included.
+- **single_frame** = one SubFeature corrupted (per-feature robustness
+  profile). **multi_frame** = the whole 64-feature vector corrupted at once
+  (the discriminative, smaller radius). Nothing temporal is perturbed.
+- **Certified radius** = largest proven-safe ε; a conservative floor.
+  Saturated single_frame results (0.999878 = the search ceiling, 1 − 2⁻¹³)
+  mean "ε ≥ 1: no single feature, over its whole normal range, can cause a
+  false alarm."
+- **Units:** ε is in per-feature MinMax-normalized units; physical value =
+  ε × `scaler.data_range_[j]`, different for each feature.
+- **Tool faithfulness:** parity vs the verbatim legacy classes ≈1e-9 at B=1
+  (deployment semantics); dropout correctly identity; use the deployed
+  `THRESHOLD` (99th pct train), not a recomputed val percentile, as τ.
