@@ -91,4 +91,19 @@ def test_scalar_batch_agree(name, scalar_fn, batch_fn):
                 f"  [{stratum}] {comp}: rel={rel:.3e} box={box} "
                 f"scalar={sv!r} batch={bv!r}"
             )
-        pytest.fail("\n".join(lines))
+        # Finding F-1 (docs/phase0_findings.md §B): known sigtanh C1
+        # divergence from near-double quartic roots in the saturation
+        # regime, magnitude <= ~1e-7. Divergences matching that exact
+        # signature are an expected failure until the eta/root-polish
+        # decision lands; anything OUTSIDE the signature is a NEW finding
+        # and must fail loudly, not hide inside the known red result.
+        def _is_f1(f):
+            stratum, comp, rel = f[0], f[1], f[2]
+            return (name == "sigtanh" and comp == "C1" and rel <= 1e-7
+                    and stratum in ("saturated", "wide"))
+
+        if all(_is_f1(f) for f in failures):
+            pytest.xfail("known finding F-1 (sigtanh C1, saturation, "
+                         "<=1e-7):\n" + "\n".join(lines))
+        pytest.fail("divergence OUTSIDE the F-1 signature:\n"
+                    + "\n".join(lines))

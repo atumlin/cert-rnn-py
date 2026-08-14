@@ -93,6 +93,62 @@ double sum and an exact axis-aligned box case — the box case caught an
 initial factor-of-2 error in both the formula and the (equally wrong) naive
 test, which is why the independent oracle exists.
 
+## E. Measurement 1 — gap over joint zonotope vs gap over box (tilt fixed)
+
+`research/phase0_gap_ratio.py` (eps=0.02, seed 20260814). For every gate
+instance recorded during a reach: gap_box = C2−C1 as the code computes it
+today; gap_Z = exact residual extrema over the true joint 2-D zonotope
+(vertices via `cert_rnn.geometry.zono2d_vertices` + edge-stationary points
+by bisection on the directional derivative + interior criticals inside the
+polygon + eps-space sample augmentation). ratio = gap_Z/gap_box ≤ 1;
+1−ratio = fraction of the gate's error bar Tier 1 would remove at fixed
+tilt. Instances with gap_box < 1e-12 (float-noise gates) are excluded from
+ratio statistics but included in gap-weighted aggregates.
+
+| combo | n meaningful | tightening mean [p10, p90] | gap-weighted removal |
+|---|---|---|---|
+| ieee9-S multi_frame | 712 | 14.4% [0.2, 42.1] | 5.5% |
+| ieee9-S single_frame | 712 | **51.4%** [29.0, 71.9] | **37.3%** |
+| synth-H16 multi_frame | 2848 | 27.9% [0.6, 52.1] | 20.8% |
+| synth-H16 single_frame | 863 | 30.7% [0.0, 55.0] | **46.1%** |
+
+Benefit holds at ALL depths (encoder t0→t29 gap-weighted removal stays
+~37–62% on ieee9-S single_frame); largest exactly where certified radii are
+decided (single-frame, the paper's headline threat model). Validation:
+eps-space samples (interior + sign corners) vs [C1_Z, C2_Z] — worst residual
+violation 4.4e-4 of gap_box, i.e. reported percentages accurate to ~0.05 pp.
+
+Measurement-tooling bugs found & fixed during validation (both in NEW
+measurement code, not the engine): (i) segment-degenerate point-in-polygon
+admitted points beyond the segment ends (perfectly-correlated operands);
+(ii) edge-slack normalized by max(1, edge_len) was vacuous for the tiny cap
+edges of sliver polygons. Both produced impossible gap_Z > gap_box values
+that the "ratio must be ≤ 1" invariant caught; regression tests added in
+tests/soundness/test_vertex_enum.py.
+
+## F. Measurement 2 — F-1 propagation to the reported radius
+
+`research/phase0_f1_propagation.py`: one-sided inward shift of C1 by 1e-8
+injected at EVERY coordinate of ONE gate at ONE timestep (upper estimate of
+F-1's reach), swept over gates × timesteps × phases, both threat models,
+both subjects. Effect measured on the final certified score bound and
+converted to an equivalent radius shift via dscore_ub/deps (finite
+difference).
+
+- Worst equivalent radius shift anywhere: **1.87e-9** (ieee9-S,
+  single_frame, enc t=2, f·c_prev).
+- Max score-level amplification through the network: ×14; most
+  configurations damp the injection (amplification < 1). No exponential
+  blow-up with early injection.
+- Reported-radius resolution is 1.2e-4 (12-round bisection); relevance
+  floor ~1e-6. Worst case sits ~500× below the floor and ~65,000× below
+  the resolution.
+
+**Verdict: F-1 cannot change any certified radius this repo reports.** It
+remains a documented numerical caveat (see §B) pending the η/root-polish
+decision. Caveat: measured on these two subjects at eps=0.02; the ~3–4
+orders of margin makes the conclusion robust to subject variation.
+
 ## Open items (next steps per plan)
 
 - Vertex enumeration promotion + property tests (step 3).

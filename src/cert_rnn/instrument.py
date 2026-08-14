@@ -102,6 +102,7 @@ class GateRecord:
     w_y: np.ndarray
     fresh_w: np.ndarray
     out_w: np.ndarray
+    operands: tuple | None = None   # (z_x, z_y) refs when keep_operands
 
 
 @dataclass
@@ -118,8 +119,22 @@ class StepRecorder:
     gates: list = field(default_factory=list)
     z4: list = field(default_factory=list)
     phase: str = "enc"
+    keep_operands: bool = False   # store (z_x, z_y) refs per gate record
+    record_geometry: bool = True  # False: skip cos/headroom/z4 (cheap runs)
+    # Optional intervention hook, called on each gate's output BEFORE it is
+    # consumed downstream: (phase, t, layer, gate, z_out, operand_ids) ->
+    # Zono. Used by perturbation-propagation studies; None = identity.
+    gate_hook: object = None
+
+    def apply_hook(self, phase, t, layer, gate, z_out, z_x, z_y):
+        if self.gate_hook is None:
+            return z_out
+        operand_ids = set(z_x.pred_ids) | set(z_y.pred_ids)
+        return self.gate_hook(phase, t, layer, gate, z_out, operand_ids)
 
     def record_gate(self, phase, t, layer, gate, z_x, z_y, z_out):
+        if not self.record_geometry:
+            return
         geo = pair_geometry(z_x, z_y)
         operand_ids = set(z_x.pred_ids) | set(z_y.pred_ids)
         fresh_cols = [i for i, pid in enumerate(z_out.pred_ids)
@@ -127,11 +142,14 @@ class StepRecorder:
         fresh_w = 2.0 * np.sum(np.abs(z_out.V[:, fresh_cols]), axis=1) \
             if fresh_cols else np.zeros(z_out.dim)
         out_w = 2.0 * np.sum(np.abs(z_out.V), axis=1)
-        self.gates.append(GateRecord(phase, t, layer, gate,
-                                     geo["cos"], geo["headroom"],
-                                     geo["w_x"], geo["w_y"], fresh_w, out_w))
+        self.gates.append(GateRecord(
+            phase, t, layer, gate, geo["cos"], geo["headroom"],
+            geo["w_x"], geo["w_y"], fresh_w, out_w,
+            operands=(z_x, z_y) if self.keep_operands else None))
 
     def record_z4(self, phase, t, layer, z_f, z_i, z_g, z_c_prev):
+        if not self.record_geometry:
+            return
         named = {"f": z_f, "i": z_i, "g": z_g, "c": z_c_prev}
         keys = list(named)
         cos = {}
@@ -160,9 +178,15 @@ def instrumented_lstm_step(z_x, z_h_prev, z_c_prev, W_in, W_rec, b,
     z_o_pre = z_pre.slice_rows(3 * H, 4 * H)
 
     z_c_term1 = bilinear_sigmoid_identity(z_c_prev, z_f_pre, allocator)
+    z_c_term1 = rec.apply_hook(rec.phase, t, layer, "f*c_prev",
+                               z_c_term1, z_c_prev, z_f_pre)
     z_c_term2 = bilinear_sigmoid_tanh(z_i_pre, z_g_pre, allocator)
+    z_c_term2 = rec.apply_hook(rec.phase, t, layer, "i*g",
+                               z_c_term2, z_i_pre, z_g_pre)
     z_c = zono_add(z_c_term1, z_c_term2)
     z_h = bilinear_sigmoid_tanh(z_o_pre, z_c, allocator)
+    z_h = rec.apply_hook(rec.phase, t, layer, "o*tanh(c)",
+                         z_h, z_o_pre, z_c)
 
     rec.record_gate(rec.phase, t, layer, "f*c_prev", z_c_prev, z_f_pre, z_c_term1)
     rec.record_gate(rec.phase, t, layer, "i*g", z_i_pre, z_g_pre, z_c_term2)
@@ -186,9 +210,11 @@ def instrumented_lstm_step_stack(z_x, z_h_layers, z_c_layers, layers,
 
 def instrumented_lstm_ae_reach(encoder, decoder, head, x_anchor, eps,
                                threat_model="multi_frame", t_pert=None,
-                               allocator: PredAllocator | None = None):
+                               allocator: PredAllocator | None = None,
+                               recorder: StepRecorder | None = None):
     """verify.lstm_ae_reach body + recording. Returns
-    (z_x_hat_seq, z_x_seq, recorder)."""
+    (z_x_hat_seq, z_x_seq, recorder). Pass a preconfigured recorder
+    (e.g. keep_operands=True) to control what is retained."""
     from cert_rnn.verify import _build_input_zonos
     from cert_rnn.zono import get_default_allocator
 
@@ -198,7 +224,7 @@ def instrumented_lstm_ae_reach(encoder, decoder, head, x_anchor, eps,
     # cannot collide. A custom allocator here would alias fresh ids with
     # input ids.
     alloc = allocator if allocator is not None else get_default_allocator()
-    rec = StepRecorder()
+    rec = recorder if recorder is not None else StepRecorder()
     H = encoder["H"]
     L_enc, L_dec = encoder["L"], decoder["L"]
     T, _D = x_anchor.shape
