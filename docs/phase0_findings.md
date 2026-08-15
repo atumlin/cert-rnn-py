@@ -308,6 +308,46 @@ axis-aligned cells but also had least to recover. A cheap skip
 (closed-form area ratio > 0.9 ⇒ box is near-exact ⇒ keep box result) trades
 nothing measurable for time.
 
+## I. Tier 1 end-to-end certified radius (actual delta, not extrapolated)
+
+`research/phase1_tier1_e2e.py` (Algorithm-1 bisection, 12 rounds, Spec C
+componentwise score bound; single-frame on frames {0,7,15,22,29}; jobs in a
+process pool). Data: research/phase0_out/tier1_e2e.csv.
+
+| subject | threat | frame | radius box → Tier 1 | Δ | time × |
+|---|---|---|---|---|---|
+| ieee9-S | multi_frame | — | 0.000732 → 0.001099 | **+50.0%** | 27× |
+| ieee9-S | single_frame | 0 | 0.017334 → 0.028198 | **+62.7%** | 14× |
+| ieee9-S | single_frame | 7 | 0.014526 → 0.023193 | **+59.7%** | 5× |
+| ieee9-S | single_frame | 15 | 0.023315 → 0.034302 | **+47.1%** | 9× |
+| ieee9-S | single_frame | 22 | 0.029785 → 0.040405 | **+35.7%** | 4× |
+| ieee9-S | single_frame | 29 | 0.020386 → 0.025269 | **+24.0%** | 6× |
+| synth-H16 | multi_frame | — | 0.014038 → 0.014038 | +0.0% | 58× |
+| synth-H16 | single_frame | 0,7,15,22 | unchanged | +0.0% | 27–84× |
+| synth-H16 | single_frame | 29 | 0.176880 → 0.178955 | +1.2% | 34× |
+
+Score bound at eps=0.02 is ≤ baseline in every row (end-to-end tightness
+ordering holds; no row looser).
+
+**Reading.** The gate-level number (37–46% error-weighted removal) does
+not transfer uniformly. On the power-grid model the radius gain is
+comparable to it; on the synthetic model it is nil. The explanatory
+variable is the M1 quantity — the fraction of the bound width contributed
+by the bilinear fresh symbols: **0.2–1.7% on synth-H16 vs 7–41% on
+ieee9-S** (measured at eps 0.02–0.2 with the recorder). The synthetic
+autoencoder is nearly linear over its perturbation range, so its certified
+bound is dominated by the exactly-propagated affine part, which Tier 1
+cannot touch. This is a cheap, per-model predictor of whether Tier 1 pays;
+recommend reporting it alongside every radius result. (M1 was deprioritized
+as "partly superseded" — this is where it turned out to matter.)
+
+**Cost.** 4–84× wall-clock in the current pure-Python per-coordinate loop
+(SAT test + admitted-cell batching), worst under multi-frame where the
+generator count is ~1000 and Z is fat. Not optimized yet: vectorizing the
+SAT test across coordinates and capping cells for fat Z should recover most
+of it; the recovery-vs-n table shows n=8 keeps 60–70% of the single-frame
+gain at ~half the cost if needed.
+
 ## Open items (next steps per plan)
 
 - Vertex enumeration promotion + property tests (step 3).
