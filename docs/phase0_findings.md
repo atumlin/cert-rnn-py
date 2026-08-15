@@ -149,6 +149,114 @@ remains a documented numerical caveat (see §B) pending the η/root-polish
 decision. Caveat: measured on these two subjects at eps=0.02; the ~3–4
 orders of margin makes the conclusion robust to subject variation.
 
+### E.1 Reporting decision (deliberate)
+
+The single-frame numbers (51% / 37% error-weighted on the power grid) are
+led with because single-frame is Algorithm 1's headline threat model. The
+all-frames numbers (**14% average / 6% error-weighted on the power grid;
+28% / 21% synthetic**) are materially weaker and are reported with equal
+prominence in every table and in the brief; the reader must not come away
+with the single-frame figure as "the" gain.
+
+### E.2 Independent oracle check (item 1) — measurement is not too low
+
+Brute-force oracle sharing NO code with the measurement path
+(`research/phase0_gap_oracle.py`: dense grid over the operand box,
+membership by the exact facet-normal H-representation of the 2-D zonotope
+plus a 720-direction fan, coordinate-descent polish constrained inside Z).
+56 instances across all four combos, stratified over phase/timestep/gate:
+**0 instances where the oracle exceeds the measurement by more than 0.1% of
+the gap** (worst deficit 2.1e-4 of gap; mean ratio 0.6516 measured vs
+0.6512 oracle). The measurement is not under-reporting gap_Z.
+
+Error accounting, corrected: the ~0.05 pp figure previously quoted is
+*sampling* error from the augmentation samples — it bounds how far the
+measured [C1_Z, C2_Z] can sit *inside* the true range for the sampled
+points, i.e. how much the benefit could be OVER-stated. Systematic error in
+the other direction (candidate set missing a true extremum ⇒ benefit
+UNDER-stated) is not bounded by sampling; it is what the oracle above
+checks, and it found none above 2e-4 of gap. (A first oracle version with a
+fixed 720-direction fan and no facet normals over-admitted points near
+sliver polygons and falsely reported up to 25% deficits; 40-digit
+recomputation sided with the measurement, the oracle was corrected, and
+this note stays as the record.)
+
+### E.3 Tilt re-optimization (item 2) — verdict: not for Tier 1
+
+`research/phase0_tilt_reopt.py`: 10 subgradient steps on the convex
+gap(A,B) from the box tilt, per gate instance, keep-best. Additional
+gap-weighted removal beyond fixed-tilt Tier 1:
+
+| combo | fixed tilt | re-optimized | additional |
+|---|---|---|---|
+| ieee9-S multi_frame | 3.7% | 7.8% | **+4.0 pp** |
+| ieee9-S single_frame | 37.7% | 42.4% | **+4.7 pp** |
+| synth-H16 multi_frame | 21.9% | 21.9% | +0.0 pp |
+| synth-H16 single_frame | 46.6% | 46.6% | +0.0 pp |
+
+Between the two decision thresholds (≈10% ⇒ include, ≈1% ⇒ skip): 4–5 pp
+on the small power-grid model, nothing on the wider synthetic one. Judgement:
+**skip for Tier 1** — the gain is model-dependent, at most a ~12% relative
+improvement on the recovered slack, and it costs ~10× the enumeration work
+per gate. Recorded for the paper as an evaluated-and-declined optimization;
+revisit only if a later benchmark shows the power-grid pattern is common.
+
+## G. R-tests against the current code (item 3) — three known signatures
+
+Harness: `tests/soundness/test_r_tests.py` (R-1 two-sided subdivision
+equality, R-2 odd-symmetry metamorphic, R-3 dense-grid oracle, T-0.4
+degenerate boxes) + `test_level1_zono.py` (Level 1 eps-space sampling with
+sign corners, edge points, coordinate-ascent adversarial refinement).
+Strata: near-degenerate-quartic adversarial stratum FIRST, then nine sign
+strata + saturated / **wide_saturated** / tight / wide / near-degenerate
+width regimes. Violations are binned by quartic conditioning 1/(p(1−p)) and
+each is classified by a 50-digit recomputation; only violations that carry
+a known signature xfail, anything else fails loudly.
+
+Results, both code paths, fast tier (14 280 R-1 checks, 680 R-3 boxes):
+- **sigid: all R-tests pass** (R-1, R-3, T-0.4 modulo F-2 below).
+- **sigtanh: 101 R-1 / 43 R-3 violations, all classified**; magnitudes by
+  conditioning bin — cond ≥ 1e5: max **7.4e-6** (wide_saturated),
+  3.1e-8 (saturated), 5.8e-9 (near-degenerate stratum); cond < 1e5:
+  ≤ 3.4e-9. Scalar and batch paths carry the same violation set (batch's
+  worst is 2× scalar's on the same boxes).
+
+**F-1 escalation.** The mechanism is now precisely characterized and it is
+a *drop*, not an imprecision: near a double quartic root at p→1 the float64
+root carries ~1e-9 error; through 1/(p(1−p)) ≈ 1e6 that error pushes
+A/(p(1−p)) across ±1, `arctanh` is rejected, and the in-box interior
+critical point is **removed from the candidate list entirely** (verified at
+50 digits on box (11.47, 38.53)×(−4.26, −3.51): true critical point at
+x=14.77, y=−3.84 with g=−0.9919846 vs reported C1=−0.9919759). Magnitude
+grows with x-range width: ≤ 3e-8 for widths ≤ 3, up to **1.7e-5** for
+saturated x-ranges 2–30 wide (both paths, ~1/3 of such boxes). The previous
+"~1e-8" ceiling in §B was for narrow boxes only.
+
+Consequence for §F: the propagation study is linear in the injected δ, so
+scaling its worst equivalent radius shift (1.9e-9 at δ=1e-8) to δ=1.7e-5
+gives **~3e-6** — still ~40× below the 1.2e-4 reporting resolution and at
+the 1e-6 relevance floor, but with far less margin than reported. The
+verdict "cannot change a reported radius" stands on these subjects but is
+now conditional on real networks not producing wide saturated pre-activation
+boxes at every coordinate of a gate; wide-saturated boxes did not occur in
+any recorded gate of the two subjects at eps=0.02. **The fix should move up
+from "before the paper" to "before end-to-end Tier 1 numbers are trusted."**
+
+**F-2** (new, tiny): a nonzero interval width below the 1e-12 point gate is
+treated as a point (zero residual). Real dropped error ≤ 0.25·max|x|·width
+≈ 4e-12 in T-0.4. Needs the outward η, nothing else.
+
+**F-3** (new, tiny): the `ratio > 1e-12` / `p ∈ (1e-12, 1−1e-12)` gates
+reject legitimate edge/interior stationary points when σ(x) or 1−σ(x) is
+below 1e-12 (|x| > 27.6). Absolute magnitude ≤ ~1e-11 (three instances at
+1.3–2.5e-13 rel in the near-degenerate stratum, x ≈ −28.8). Same fix family
+as F-1 (evaluate candidates outward over an interval instead of gating).
+
+Bar for proceeding (zero violations across the nightly budget): **not met
+on sigtanh; met on sigid.** The R-tests xfail on the three signatures and
+will hard-fail on any new one — that is the harness Tier 1 is written
+against. Ledger row added (soundness.md S15).
+
 ## Open items (next steps per plan)
 
 - Vertex enumeration promotion + property tests (step 3).

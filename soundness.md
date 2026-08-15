@@ -31,7 +31,8 @@ Every over-approximation in the pipeline must appear here with an explicit justi
 | S11 | Generator order reduction | boxes small generators | outward | Only if implemented |
 | S12 | DJIS partition | must **cover** the ball | — | **Gaps are unsound.** Overlap is fine. See T-5.1 |
 | S13 | DJIS combination | ε_c = min_j ε_c^(j) | outward | Property holds on the union iff it holds on every piece |
-| S14 | Floating point | outward rounding by η | outward | See §4 |
+| S14 | Floating point | outward rounding by η | outward | See §4 — **UNIMPLEMENTED as of Phase 0** |
+| S15 | Bilinear (C₁, C₂) | exact residual min/max by candidate enumeration over the box (corners, edge stationary points, interior critical points via quartic in p=σ(x)) | **UNPROVEN in fp** | Structurally complete (all quartic roots via companion eigenvalues); numerically incomplete: R-tests show three known signatures — F-1 near-double-root candidate DROP (≤ ~2e-5 in wide saturated x-ranges), F-2 sub-1e-12 width treated as point (≤ ~1e-11), F-3 1e-12 candidate gates in deep saturation (≤ ~1e-11). All inward. See docs/phase0_findings.md §G and tests/soundness/test_r_tests.py. Fix path: polish critical points in (x,y)-space, certified error radius, evaluate outward over the interval; magnitude-relative η. |
 
 **Rule:** a PR that adds an over-approximation without adding a row here does not merge.
 

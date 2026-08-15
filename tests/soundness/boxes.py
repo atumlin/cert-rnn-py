@@ -28,7 +28,7 @@ SIGN_STRATA = {
     "origin": ("s", "s"),
 }
 
-REGIME_STRATA = ("saturated", "tight", "wide", "near_degenerate")
+REGIME_STRATA = ("saturated", "wide_saturated", "tight", "wide", "near_degenerate")
 
 ALL_STRATA = tuple(SIGN_STRATA) + REGIME_STRATA
 
@@ -52,6 +52,13 @@ def _regime_interval(rng: np.random.Generator, n: int, regime: str):
     if regime == "saturated":
         c = rng.choice([-1.0, 1.0], n) * rng.uniform(10.0, 30.0, n)
         w = rng.uniform(1e-3, 3.0, n)
+    elif regime == "wide_saturated":
+        # x-range starting deep in saturation AND wide: where the
+        # interior-critical quartic has a near-double root at p->1 and
+        # the dropped-candidate magnitude is largest (finding F-1, ~1e-5)
+        lo = rng.choice([-1.0, 1.0], n) * rng.uniform(8.0, 20.0, n)
+        w = rng.uniform(2.0, 30.0, n)
+        return np.minimum(lo, lo + np.sign(lo) * w), np.maximum(lo, lo + np.sign(lo) * w)
     elif regime == "tight":
         c = rng.uniform(-3.0, 3.0, n)
         w = rng.uniform(1e-6, 1e-3, n)
@@ -65,6 +72,60 @@ def _regime_interval(rng: np.random.Generator, n: int, regime: str):
     else:
         raise ValueError(regime)
     return c - 0.5 * w, c + 0.5 * w
+
+
+def sigtanh_tilt(lx, ux, ly, uy):
+    """The shipped corner-fit tilt for sigma(x)tanh(y) (transformers.py)."""
+    sl = 1 / (1 + np.exp(-lx)); su = 1 / (1 + np.exp(-ux))
+    tly = np.tanh(ly); tuy = np.tanh(uy)
+    A = (su - sl) * (tly + tuy) / (2 * (ux - lx))
+    B = (sl + su) * (tuy - tly) / (2 * (uy - ly))
+    return A, B
+
+
+def quartic_conditioning(A, B):
+    """For the interior-critical quartic p^4-(2+B)p^3+(1+2B)p^2-Bp-A^2 of
+    the sigma*tanh residual: return (min pairwise root separation among
+    real roots in (0,1), max conditioning 1/(p(1-p)) among them). Boxes
+    with tiny separation are where the |imag|<1e-10 realness gate and
+    root-recovery error bite (finding F-1). NaN if no real root in (0,1)."""
+    A = np.atleast_1d(A); B = np.atleast_1d(B)
+    sep = np.full(A.shape, np.nan)
+    cond = np.full(A.shape, np.nan)
+    for i in range(A.shape[0]):
+        r = np.roots([1.0, -(2.0 + B[i]), 1.0 + 2.0 * B[i], -B[i], -A[i] ** 2])
+        pr = np.sort(r.real[(np.abs(r.imag) < 1e-6)])
+        pr = pr[(pr > 0) & (pr < 1)]
+        if pr.size:
+            cond[i] = float(np.max(1.0 / (pr * (1 - pr))))
+            allr = np.sort(r.real)
+            sep[i] = float(np.min(np.diff(allr))) if allr.size > 1 else np.inf
+    return sep, cond
+
+
+def near_degenerate_quartic_boxes(rng: np.random.Generator, n: int,
+                                  n_candidates: int = 40000) -> tuple:
+    """Adversarial stratum: sigma*tanh boxes whose interior-critical
+    quartic has (nearly) coincident roots or a root near p=0/1, i.e.
+    poorly conditioned root recovery. Draws many candidate boxes across
+    the saturation/wide regimes, scores by min root separation and by
+    conditioning 1/(p(1-p)), keeps the n worst by each criterion.
+    Returns (lx, ux, ly, uy)."""
+    lx = np.empty(0); ux = np.empty(0); ly = np.empty(0); uy = np.empty(0)
+    for regime in ("saturated", "wide", "tight"):
+        for other in ("s", "p", "n"):
+            m = n_candidates // 9
+            rlx, rux = _regime_interval(rng, m, regime)
+            gly, guy = _interval(rng, m, other)
+            lx = np.r_[lx, rlx]; ux = np.r_[ux, rux]
+            ly = np.r_[ly, gly]; uy = np.r_[uy, guy]
+    A, B = sigtanh_tilt(lx, ux, ly, uy)
+    sep, cond = quartic_conditioning(A, B)
+    ok = np.isfinite(sep) & np.isfinite(cond)
+    idx_sep = np.argsort(np.where(ok, sep, np.inf))[: n // 2]
+    idx_cond = np.argsort(np.where(ok, -cond, np.inf))[: n - n // 2]
+    idx = np.unique(np.r_[idx_sep, idx_cond])
+    return lx[idx], ux[idx], ly[idx], uy[idx]
 
 
 def stratified_boxes(rng: np.random.Generator, n_per: int) -> dict:
@@ -85,7 +146,13 @@ def stratified_boxes(rng: np.random.Generator, n_per: int) -> dict:
         rly, ruy = _regime_interval(rng, n_per, regime)
         glx, gux = _interval(rng, n_per, "s")
         gly, guy = _interval(rng, n_per, "s")
-        which = rng.integers(0, 3, n_per)  # 0: x only, 1: y only, 2: both
+        if regime == "wide_saturated":
+            # y moderate (|y| <= 5) so tanh is not saturated: the
+            # dangerous configuration is saturated x with live y
+            gly = rng.uniform(-5.0, 4.0, n_per); guy = gly + rng.uniform(0.3, 4.0, n_per)
+            which = np.zeros(n_per, dtype=int)   # x only
+        else:
+            which = rng.integers(0, 3, n_per)  # 0: x only, 1: y only, 2: both
         lx = np.where(which == 1, glx, rlx)
         ux = np.where(which == 1, gux, rux)
         ly = np.where(which == 0, gly, rly)
