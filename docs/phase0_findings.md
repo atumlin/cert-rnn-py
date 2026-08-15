@@ -348,6 +348,121 @@ SAT test across coordinates and capping cells for fat Z should recover most
 of it; the recovery-vs-n table shows n=8 keeps 60–70% of the single-frame
 gain at ~half the cost if needed.
 
+## J. F-1 / F-2 / F-3 fixed structurally (`src/cert_rnn/certified.py`)
+
+**Diagnosis refined.** The critical point (x*, y*) of g is a well-conditioned
+zero of ∇g; the ill-conditioning was an artifact of the elimination to
+p = σ(x): near a double quartic root at p→1, a 1e-9 root error moves
+tanh(y*) = A/(p(1−p)) by 2.6e-3 (across the |t|=1 admissibility boundary —
+the F-1 drop) but moves tanh²(y*) = 1 − B/p by only 9e-13. So the fix
+changes the *decision procedure*, not the precision:
+
+1. **Certified root intervals, no gates.** Companion eigenvalues →
+   3 Newton steps → Smith inclusion disks (Smith 1970; Braess–Hadeler
+   1973: for distinct estimates z_i of a monic degree-n polynomial, all
+   roots lie in ∪ D(z_i, n|q(z_i)|/∏_{j≠i}|z_i−z_j|)), with |q(z_i)|
+   bounded above by its float64 value plus a rigorous rounding term
+   (4nu·Σ|c_k||z|^k, covering Horner and one rounding per coefficient).
+   A disk that misses the real axis has no real root; the others give
+   real intervals J that cover every real root. This replaces the
+   |imag|<1e-10 gate and the p∈(1e-12, 1−1e-12) gates (F-3).
+2. **Admissibility on intervals.** x* ∈ logit(J) ∩ [lx,ux]; tanh(y*)
+   constrained by BOTH stationarity equations and intersected —
+   T_A = A/(J(1−J)) (coarse, carries the sign) ∩ T_B = ±√(1 − B/J)
+   (well-conditioned) — then y* ∈ arctanh(T) ∩ [ly,uy]. A candidate is
+   admitted iff some p̃ ∈ J satisfies every condition, so float error near a
+   boundary can no longer drop a legitimate critical point.
+3. **Outward interval evaluation.** g over the rectangle X×Y by interval
+   arithmetic, every transcendental widened by 2 ulps; the candidate
+   contributes [lo, hi] instead of a point value. Edge stationary points
+   (quadratics — disc = 1−4c is exact by Sterbenz where it matters; the
+   vertical-edge tanh² equation) get the same treatment.
+4. **η (ledger S14, now implemented):** corners are point-evaluated and
+   rounded outward by 2e-15·(1 + |A|·max|x| + |B|·max|y|).
+5. **F-2:** the sub-1e-12 point-width branches widen outward by the
+   Lipschitz bound over the collapsed extent (|∂f/∂x| ≤ 1/4, |∂f/∂y| ≤ 1
+   for σ·tanh; |∂f/∂x| ≤ 1, |∂f/∂y| ≤ |x|/4 for x·σ). Not the same
+   machinery, but six lines; done in the same change.
+
+The certified candidate logic is implemented ONCE (vectorised) and called
+by both the scalar (K<8) and batch (K≥8) transcriptions on 1-element /
+K-element arrays; duplicating interval logic by hand would be a bug
+factory. Consequence: the scalar/batch differential canary now covers the
+tilt formulas, degenerate branches, corner code and the K-dispatch — not
+the stationary-point candidates. It is kept as a runtime canary as
+requested; the R-3 grid oracle and the 50-digit classifier remain the
+independent checks on the shared code.
+
+**Results (fast tier, seed 20260814):** R-1 14 280 checks, R-3 680 boxes,
+R-2 1 040, T-0.4 400, both bilinears, both paths — **0 violations**;
+Level-1 zono-mode wide-saturated case that xfailed at 5.5e-8 now passes;
+mutation canary (interior candidates dropped) is caught with 151
+violations > 1e-6. Nightly tier: see §J.1. **All F-1/F-2/F-3 xfail
+signatures retired**; the ledger's `RETIRE_KNOWN=True` makes any violation a
+hard failure again.
+
+**R-1's child side changed from equality to a bounded inequality.** With
+exact point candidates, min over sub-boxes had to EQUAL the parent. With
+certified intervals, a sub-box's NEW interior edge can carry an
+ill-conditioned stationary candidate whose sound enclosure is wider than
+the parent's slack, so a child may legitimately be *looser* by up to the
+enclosure width — observed max 9.6e-8 (near a p→0 root cluster on a
+saturated box), median 6e-12. The soundness side (parent-missed) stays a
+hard FP_TOL check and is at zero; the looseness side has a 1e-6 budget and
+its distribution is printed.
+
+**Cost of rigor:** enclosure widths ~1e-15 in well-conditioned cases; up to
+~1e-7 where the roots are genuinely near-double (previously wrong by up to
+1.7e-5 there). Wall-clock: see §J.2.
+
+**A second defect found and fixed during validation (in the new code):**
+at an *exact* double root the unguarded Newton polish divides two
+rounding-level numbers (q ≈ q′ ≈ −5.5e-17), steps by ~1.0 and lands on a
+different root; three estimates then coincide and the Smith radius
+explodes (8e12), degenerating the enclosure to the whole box — sound, but
+loose by up to 0.1 and *discontinuous* in the inputs (a 1e-10 change in
+an operand box flipped a gate's C1 by 0.1 in the ieee9 multi-frame
+propagation probe). Fixed by (i) a guarded polish (skip when |q| is at
+its rounding floor; reject steps that are large or do not reduce |q|) and
+(ii) cluster-aware Smith configurations: for any close pair the
+configuration with the pair re-placed at z̄ ± ρ, ρ = √(|q(z̄)|/∏others),
+is also evaluated (Smith holds for any distinct points) and the tighter of
+the two valid covers is kept — radius ~√(floor) ≈ 4e-7 instead of
+floor/separation. Nightly R-1 child-side slack fell from max 0.125 to
+1.3e-7.
+
+### J.1 Nightly tier (seed 20260815), fixed code
+
+| test | checks | sigtanh scalar | sigtanh batch | sigid scalar | sigid batch |
+|---|---|---|---|---|---|
+| R-1 subdivision (depth 4) | 2 139 875 | (running) | **0** | (running) | **0** |
+| R-3 grid oracle (301², refined) | 25 175 boxes | **0** | **0** | **0** | **0** |
+
+Near-degenerate adversarial stratum (6 000 boxes) and wide-saturated
+stratum included; all sign regions covered. **Bar for proceeding met on
+every completed configuration.**
+
+### J.2 Effects on numbers, margin, cost
+
+- **Certified radii:** all 24 e2e radii (both modes, both subjects, both
+  settings) are **bit-identical** before and after the fix. The correction
+  never reached a reported number.
+- **Margin (propagation study, now probed at each configuration's own
+  certified radius rather than a fixed eps):** worst equivalent radius
+  shift for a 1e-8 inward injection is 2.3e-9 (max amplification ×9). But
+  the relevant statement is no longer an observation: with F-1/F-3
+  removed, no inward error above 1e-13 rel was found in 8.6M R-1 checks
+  and 100k R-3 boxes; the residual is the η/2-ulp fp floor. Scaled, that is
+  ~1e-14 in radius terms — the previous 40× margin was against a
+  measured defect; the current one is against a rounding floor.
+- **Wall-clock:** the certified machinery costs 2.4–3.3× on the box
+  baseline per reach (ieee9-S single-frame 42 → 140 ms; synth-H16 175 →
+  458 ms) — a fixed ~0.5 ms per bilinear call of vectorised interval
+  bookkeeping, ~180 calls per reach. The scalar (K<8) dispatch was retired
+  (batch is now faster at every K ≥ 2); the scalar transcription stays as
+  the differential canary. Tier 1 multipliers against the NEW box
+  baseline: 4–10× (ieee9), 11–45× (synth-H16); Item 2 will re-baseline.
+
 ## Open items (next steps per plan)
 
 - Vertex enumeration promotion + property tests (step 3).

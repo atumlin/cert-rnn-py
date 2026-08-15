@@ -36,6 +36,11 @@ from tests.soundness.boxes import (
 
 SEED = 20260814
 FP_TOL = 1e-13         # relative; violations below this are fp noise
+# R-1 looseness side: certified interval candidates on a sub-box's new
+# edges may be wider than the parent's slack (see _run_r1). Budget for the
+# child-looser-than-parent excess; larger = enclosure blow-up.
+CHILD_SLACK_TOL = 1e-6
+RETIRE_KNOWN = True    # F-1/F-2/F-3 fixed: known signatures no longer xfail
 COND_BINS = (0, 10, 100, 1e3, 1e4, 1e5, np.inf)
 
 # ---------- shared helpers ----------
@@ -154,6 +159,7 @@ class ViolationLedger:
         self.rows = []
         self.n_checked = 0
         self.known = []   # parallel to rows
+        self.child_slack = []   # R-1 looseness-side excesses (informational)
 
     def add(self, stratum, cond, rel, detail, f1=False, known=""):
         self.rows.append((stratum, _cond_bin(cond), float(rel), detail))
@@ -170,21 +176,24 @@ class ViolationLedger:
         if not self.rows:
             return
         rep = self.report()
-        if all(k != "" for k in self.known):
-            tags = sorted(set(self.known))
-            pytest.xfail(f"all violations carry known signatures {tags} "
-                         "(F-1: interior critical point dropped/misplaced by "
-                         "float64 root recovery near a double quartic root; "
-                         "F-2: sub-1e-12 width treated as a point; F-3: 1e-12 "
-                         "candidate gates in deep saturation):\n" + rep)
-        n_new = sum(1 for k in self.known if k == "")
-        pytest.fail(f"{n_new} violation(s) OUTSIDE known signatures:\n" + rep)
+        # F-1/F-2/F-3 were FIXED (cert_rnn.certified + F-2 slack); their
+        # signatures are still labelled in the report for diagnosis but no
+        # longer excuse a failure. RETIRE_KNOWN=False restores the xfail
+        # behaviour for archaeology only.
+        if not RETIRE_KNOWN and all(k != "" for k in self.known):
+            pytest.xfail("known signatures (retired mode off):\n" + rep)
+        pytest.fail(f"{len(self.rows)} violation(s):\n" + rep)
 
     def report(self):
         n_f1 = sum(self.f1_flags)
         lines = [f"{self.title}: {len(self.rows)} violations > {FP_TOL:g} rel "
                  f"in {self.n_checked} checks ({n_f1} F-1 signature, "
                  f"{len(self.rows) - n_f1} other)"]
+        if self.child_slack:
+            cs = np.array(self.child_slack)
+            lines.append(f"  [info] child-looser-than-parent (certified enclosure "
+                         f"slack on sub-box edges): n={cs.size} max={cs.max():.3e} "
+                         f"med={np.median(cs):.3e}")
         bins = {}
         for (s, b, r, _), f in zip(self.rows, self.f1_flags):
             bins.setdefault((s, b), []).append((r, f))
@@ -225,23 +234,33 @@ def _run_r1(kind, path, boxes, depth):
                 led.n_checked += lx.shape[0]
                 sc1 = np.maximum(1.0, np.abs(C1p))
                 sc2 = np.maximum(1.0, np.abs(C2p))
-                # child below parent min => parent MISSED an extremum (unsound)
-                # child above parent min => a child reported an impossible value
-                for arr, name in ((np.abs(C1s - C1p) / sc1, "C1"),
-                                  (np.abs(C2s - C2p) / sc2, "C2")):
-                    for i in np.flatnonzero(arr > FP_TOL):
-                        side = ("parent-missed" if
-                                ((name == "C1" and C1s[i] < C1p[i]) or
-                                 (name == "C2" and C2s[i] > C2p[i]))
-                                else "child-impossible")
+                # Soundness side: child below parent min (or above parent
+                # max) => the parent MISSED an extremum. Hard, tol FP_TOL.
+                # Looseness side: child above parent min (or below parent
+                # max). With exact point candidates this was an equality;
+                # with the certified interval candidates (cert_rnn.certified)
+                # a sub-box's NEW interior edge can carry an ill-conditioned
+                # stationary candidate whose sound enclosure is wider than
+                # the parent's slack, so the child may legitimately be
+                # LOOSER by up to the enclosure width. Budget CHILD_SLACK_TOL;
+                # anything beyond it is an enclosure blow-up bug.
+                for arr_signed, name in ((C1s - C1p, "C1"), (C2p - C2s, "C2")):
+                    sc = sc1 if name == "C1" else sc2
+                    rel = arr_signed / sc          # < 0: parent missed; > 0: child looser
+                    for i in np.flatnonzero(rel < -FP_TOL):
                         f1 = (kind == "sigtanh" and
                               is_f1_signature(A[i], B[i], plx[i], pux[i], ply[i], puy[i]))
-                        absv = arr[i] * (sc1[i] if name == "C1" else sc2[i])
+                        absv = -rel[i] * sc[i]
                         known = "F-3" if (not f1 and is_f3_signature(absv, plx[i], pux[i])) else ""
-                        led.add(stratum, cond[i], arr[i],
-                                f"{name} {side} box=({plx[i]:.6g},{pux[i]:.6g},"
+                        led.add(stratum, cond[i], -rel[i],
+                                f"{name} parent-missed box=({plx[i]:.6g},{pux[i]:.6g},"
                                 f"{ply[i]:.6g},{puy[i]:.6g}) A={A[i]:.6g} B={B[i]:.6g}",
                                 f1=f1, known=known)
+                    for i in np.flatnonzero(rel > CHILD_SLACK_TOL):
+                        led.add(stratum, cond[i], rel[i],
+                                f"{name} child-looser-than-budget box=({plx[i]:.6g},"
+                                f"{pux[i]:.6g},{ply[i]:.6g},{puy[i]:.6g})")
+                    led.child_slack.extend(rel[rel > FP_TOL].tolist())
             cur = nxt
     return led
 
@@ -451,3 +470,26 @@ def test_r3_grid_oracle_nightly(kind, path):
     led = _run_r3(kind, path, boxes, P["r3_grid"], rng)
     print(f"\n[seed={SEED+1}] " + led.report())
     led.finish()
+
+
+# ---------- mutation canary (soundness.md §3): the suite must be able to fail ----------
+
+@pytest.mark.soundness
+def test_mutation_dropped_interior_candidates_is_caught(monkeypatch):
+    """Deliberate defect: drop every interior critical-point candidate of
+    sigma*tanh. R-3 on the near-degenerate/wide-saturated strata MUST
+    report violations; if it does not, the harness is not measuring what
+    it claims."""
+    import cert_rnn.certified as cert
+
+    def no_interior(A, B, lx, ux, ly, uy):
+        K = A.shape[0]
+        return np.full((K, 8), np.nan), np.full((K, 8), np.nan)
+
+    monkeypatch.setattr(cert, "sigtanh_interior_candidates", no_interior)
+    rng = np.random.default_rng(SEED)
+    boxes = _all_boxes(rng, 30, 60)
+    led = _run_r3("sigtanh", "batch", boxes, 61, rng)
+    print(f"\n[seed={SEED}] mutation canary: {len(led.rows)} violations")
+    assert led.rows, "mutation (dropped interior candidates) SURVIVED R-3"
+    assert max(r[2] for r in led.rows) > 1e-6, "mutation caught only at fp scale"

@@ -232,109 +232,39 @@ def _tanh_plane_1d_batch(ly: np.ndarray, uy: np.ndarray):
 def _c1c2_sigtanh_batch(A: np.ndarray, B: np.ndarray,
                         lx: np.ndarray, ux: np.ndarray,
                         ly: np.ndarray, uy: np.ndarray):
-    """Batched exact min/max of g(x, y) = sigma(x) tanh(y) - A x - B y.
+    """Batched min/max of g(x, y) = sigma(x) tanh(y) - A x - B y over the box.
 
     A, B, lx, ux, ly, uy: (K,) arrays. Returns C1, C2 each (K,) arrays.
-    Searches 4 corners + 4 vertical-edge stationary candidates + 4
-    horizontal-edge stationary candidates + 4 interior quartic roots,
-    all batched. Invalid candidates use NaN so np.nanmin/nanmax skip them.
+    Candidates: 4 corners (point values, rounded outward by eta) plus
+    CERTIFIED interval enclosures of g at every edge-stationary point and
+    every interior critical point (cert_rnn.certified: Smith root
+    inclusion + interval admissibility + outward interval evaluation).
+    Invalid candidates are NaN so np.nanmin/nanmax skip them.
     """
-    K = A.shape[0]
+    from cert_rnn.certified import (
+        eta_outward,
+        sigtanh_hedge_candidates,
+        sigtanh_interior_candidates,
+        sigtanh_vedge_candidates,
+    )
 
     def g(x, y):
         return _sigmoid(x) * np.tanh(y) - A * x - B * y
 
-    NAN = np.nan
-    cands = [g(lx, ly), g(lx, uy), g(ux, ly), g(ux, uy)]
-
-    # Vertical-edge stationary: at x = x_e, sigma(x_e) tanh'(y) = B
-    #   => tanh(y_crit)^2 = 1 - B/sigma(x_e).
-    def _vert_edge(x_e):
-        sig_xe = _sigmoid(x_e)
-        sig_ok = sig_xe > 1e-15
-        ratio = np.where(sig_ok, B / np.where(sig_ok, sig_xe, 1.0), NAN)
-        valid = (ratio > 1e-12) & (ratio < 1 - 1e-12)
-        t2 = np.where(valid, 1.0 - ratio, NAN)
-        t = np.sqrt(np.where(valid, np.maximum(t2, 0.0), 0.0))
-        tv_unit = valid & (t < 1.0)
-        t_safe = np.clip(t, 0.0, 1.0 - 1e-15)
-        y_pos = np.where(tv_unit, np.arctanh(t_safe), NAN)
-        y_neg = -y_pos
-        in_pos = tv_unit & (y_pos >= ly) & (y_pos <= uy)
-        in_neg = tv_unit & (y_neg >= ly) & (y_neg <= uy)
-        return (
-            np.where(in_pos, g(x_e, np.where(in_pos, y_pos, ly)), NAN),
-            np.where(in_neg, g(x_e, np.where(in_neg, y_neg, ly)), NAN),
-        )
-
-    for c1, c2 in (_vert_edge(lx), _vert_edge(ux)):
-        cands.append(c1); cands.append(c2)
-
-    # Horizontal-edge stationary: at y = y_e, sigma'(x) tanh(y_e) = A
-    #   => p^2 - p + A/tanh(y_e) = 0 with p = sigma(x_crit).
-    def _horiz_edge(y_e):
-        ty = np.tanh(y_e)
-        ty_ok = np.abs(ty) > 1e-15
-        ratio = np.where(ty_ok, A / np.where(ty_ok, ty, 1.0), NAN)
-        valid = (ratio > 1e-12) & (ratio < 0.25 - 1e-12)
-        disc = np.where(valid, 1 - 4 * ratio, NAN)
-        valid = valid & (disc > 0)
-        s = np.sqrt(np.where(valid, np.maximum(disc, 0.0), 0.0))
-        p1 = (1 - s) / 2
-        p2 = (1 + s) / 2
-        v1 = valid & (p1 > 1e-12) & (p1 < 1 - 1e-12)
-        v2 = valid & (p2 > 1e-12) & (p2 < 1 - 1e-12)
-        p1s = np.clip(p1, 1e-15, 1 - 1e-15)
-        p2s = np.clip(p2, 1e-15, 1 - 1e-15)
-        x1 = np.where(v1, np.log(p1s / (1 - p1s)), NAN)
-        x2 = np.where(v2, np.log(p2s / (1 - p2s)), NAN)
-        in1 = v1 & (x1 >= lx) & (x1 <= ux)
-        in2 = v2 & (x2 >= lx) & (x2 <= ux)
-        return (
-            np.where(in1, g(np.where(in1, x1, lx), y_e), NAN),
-            np.where(in2, g(np.where(in2, x2, lx), y_e), NAN),
-        )
-
-    for c1, c2 in (_horiz_edge(ly), _horiz_edge(uy)):
-        cands.append(c1); cands.append(c2)
-
-    # Interior critical points: quartic in p = sigma(x):
-    #   p^4 - (2+B) p^3 + (1+2B) p^2 - B p - A^2 = 0
-    # Batched via np.linalg.eigvals on (K, 4, 4) companion matrices.
-    companion = np.zeros((K, 4, 4))
-    companion[:, 1, 0] = 1.0
-    companion[:, 2, 1] = 1.0
-    companion[:, 3, 2] = 1.0
-    # Monic poly p^4 + c3 p^3 + c2 p^2 + c1 p + c0; companion last col is [-c0,-c1,-c2,-c3].
-    # Our poly: c3 = -(2+B), c2 = 1+2B, c1 = -B, c0 = -A^2.
-    companion[:, 0, 3] = A * A
-    companion[:, 1, 3] = B
-    companion[:, 2, 3] = -(1 + 2 * B)
-    companion[:, 3, 3] = 2 + B
-    eigvals = np.linalg.eigvals(companion)  # (K, 4) complex
-
-    for j in range(4):
-        ev = eigvals[:, j]
-        real_mask = np.abs(ev.imag) < 1e-10
-        p = np.where(real_mask, ev.real, NAN)
-        p_unit = (p > 1e-12) & (p < 1 - 1e-12)
-        p_safe = np.clip(p, 1e-15, 1 - 1e-15)
-        x_crit = np.where(p_unit, np.log(p_safe / (1 - p_safe)), NAN)
-        x_in = p_unit & (x_crit >= lx - 1e-12) & (x_crit <= ux + 1e-12)
-        denom = np.maximum(p_safe * (1 - p_safe), 1e-30)
-        ratio_y = np.where(p_unit, A / denom, NAN)
-        y_unit = x_in & (np.abs(ratio_y) < 1 - 1e-12)
-        ratio_y_safe = np.clip(ratio_y, -1 + 1e-15, 1 - 1e-15)
-        y_crit = np.where(y_unit, np.arctanh(ratio_y_safe), NAN)
-        in_box = y_unit & (y_crit >= ly - 1e-12) & (y_crit <= uy + 1e-12)
-        cands.append(np.where(in_box,
-                              g(np.where(in_box, x_crit, lx),
-                                np.where(in_box, y_crit, ly)),
-                              NAN))
-
-    stacked = np.stack(cands, axis=-1)
-    C1 = np.nanmin(stacked, axis=-1)
-    C2 = np.nanmax(stacked, axis=-1)
+    eta = eta_outward(A, B, lx, ux, ly, uy)
+    corners = np.stack([g(lx, ly), g(lx, uy), g(ux, ly), g(ux, uy)], axis=1)
+    los = [corners - eta[:, None]]
+    his = [corners + eta[:, None]]
+    for x_e in (lx, ux):
+        lo, hi = sigtanh_vedge_candidates(A, B, ly, uy, x_e)
+        los.append(lo); his.append(hi)
+    for y_e in (ly, uy):
+        lo, hi = sigtanh_hedge_candidates(A, B, lx, ux, y_e)
+        los.append(lo); his.append(hi)
+    lo, hi = sigtanh_interior_candidates(A, B, lx, ux, ly, uy)
+    los.append(lo); his.append(hi)
+    C1 = np.nanmin(np.concatenate(los, axis=1), axis=1)
+    C2 = np.nanmax(np.concatenate(his, axis=1), axis=1)
     return C1, C2
 
 
@@ -369,6 +299,9 @@ def _sigtanh_plane_batch(lx: np.ndarray, ux: np.ndarray,
         pos = ty > 0
         C1_sub = np.where(small, 0.0, np.where(pos, ty * c1s, ty * c2s))
         C2_sub = np.where(small, 0.0, np.where(pos, ty * c2s, ty * c1s))
+        # F-2: y is treated as the point ly but truly spans wy < 1e-12;
+        # |d f / d y| = sigma(x) tanh'(y) <= 1, so widen outward by wy.
+        C1_sub = C1_sub - wy[only_y]; C2_sub = C2_sub + wy[only_y]
         A[only_y] = A_sub; B[only_y] = B_sub
         C1[only_y] = C1_sub; C2[only_y] = C2_sub
 
@@ -383,15 +316,18 @@ def _sigtanh_plane_batch(lx: np.ndarray, ux: np.ndarray,
         pos = sx > 0
         C1_sub = np.where(small, 0.0, np.where(pos, sx * c1t, sx * c2t))
         C2_sub = np.where(small, 0.0, np.where(pos, sx * c2t, sx * c1t))
+        # F-2: |d f / d x| = sigma'(x) tanh(y) <= 1/4 over the true wx.
+        C1_sub = C1_sub - 0.25 * wx[only_x]; C2_sub = C2_sub + 0.25 * wx[only_x]
         A[only_x] = A_sub; B[only_x] = B_sub
         C1[only_x] = C1_sub; C2[only_x] = C2_sub
 
-    # Both points: constant.
+    # Both points: constant (F-2: widen by the collapsed extents).
     both = x_point & y_point
     if both.any():
         fval = sl[both] * tly[both]
+        slack = 0.25 * wx[both] + wy[both]
         A[both] = 0.0; B[both] = 0.0
-        C1[both] = fval; C2[both] = fval
+        C1[both] = fval - slack; C2[both] = fval + slack
 
     return A, B, C1, C2
 
@@ -399,45 +335,23 @@ def _sigtanh_plane_batch(lx: np.ndarray, ux: np.ndarray,
 def _c1c2_sigid_batch(A: np.ndarray, B: np.ndarray,
                       lx: np.ndarray, ux: np.ndarray,
                       ly: np.ndarray, uy: np.ndarray):
-    """Batched exact min/max of g(x, y) = x sigma(y) - A x - B y."""
-    K = A.shape[0]
+    """Batched min/max of g(x, y) = x sigma(y) - A x - B y over the box.
+    Corners (outward by eta) + certified vertical-edge stationary intervals
+    (the interior has only saddles; horizontal edges are linear in x)."""
+    from cert_rnn.certified import eta_outward, sigid_vedge_candidates
 
     def g(x, y):
         return x * _sigmoid(y) - A * x - B * y
 
-    NAN = np.nan
-    cands = [g(lx, ly), g(lx, uy), g(ux, ly), g(ux, uy)]
-
-    # Vertical-edge stationary (x = x_e, x_e != 0): x sigma'(y) = B
-    #   => p^2 - p + B/x_e = 0, p = sigma(y_crit).
-    def _vert_edge(x_e):
-        x_ok = np.abs(x_e) > 1e-15
-        ratio = np.where(x_ok, B / np.where(x_ok, x_e, 1.0), NAN)
-        valid = x_ok & (ratio > 0) & (ratio < 0.25 - 1e-12)
-        disc = np.where(valid, 1 - 4 * ratio, NAN)
-        valid = valid & (disc > 0)
-        s = np.sqrt(np.where(valid, np.maximum(disc, 0.0), 0.0))
-        p1 = (1 - s) / 2
-        p2 = (1 + s) / 2
-        v1 = valid & (p1 > 0) & (p1 < 1)
-        v2 = valid & (p2 > 0) & (p2 < 1)
-        p1s = np.clip(p1, 1e-15, 1 - 1e-15)
-        p2s = np.clip(p2, 1e-15, 1 - 1e-15)
-        y1 = np.where(v1, np.log(p1s / (1 - p1s)), NAN)
-        y2 = np.where(v2, np.log(p2s / (1 - p2s)), NAN)
-        in1 = v1 & (y1 >= ly) & (y1 <= uy)
-        in2 = v2 & (y2 >= ly) & (y2 <= uy)
-        return (
-            np.where(in1, g(x_e, np.where(in1, y1, ly)), NAN),
-            np.where(in2, g(x_e, np.where(in2, y2, ly)), NAN),
-        )
-
-    for c1, c2 in (_vert_edge(lx), _vert_edge(ux)):
-        cands.append(c1); cands.append(c2)
-
-    stacked = np.stack(cands, axis=-1)
-    C1 = np.nanmin(stacked, axis=-1)
-    C2 = np.nanmax(stacked, axis=-1)
+    eta = eta_outward(A, B, lx, ux, ly, uy)
+    corners = np.stack([g(lx, ly), g(lx, uy), g(ux, ly), g(ux, uy)], axis=1)
+    los = [corners - eta[:, None]]
+    his = [corners + eta[:, None]]
+    for x_e in (lx, ux):
+        lo, hi = sigid_vedge_candidates(A, B, ly, uy, x_e)
+        los.append(lo); his.append(hi)
+    C1 = np.nanmin(np.concatenate(los, axis=1), axis=1)
+    C2 = np.nanmax(np.concatenate(his, axis=1), axis=1)
     return C1, C2
 
 
@@ -457,12 +371,14 @@ def _sigid_plane_batch(lx: np.ndarray, ux: np.ndarray,
     B = (lx + ux) * (suy - sly) / (2 * wy_safe)
     C1, C2 = _c1c2_sigid_batch(A, B, lx, ux, ly, uy)
 
-    # Degenerate y (y is a point): f = x * sigma(ly) is affine in x. Zero error.
+    # Degenerate y (y is a point): f = x * sigma(ly) is affine in x.
+    # F-2: over the true wy < 1e-12, |d f / d y| = |x| sigma'(y) <= |x|/4.
     if y_point.any():
+        slack = 0.25 * np.maximum(np.abs(lx[y_point]), np.abs(ux[y_point])) * wy[y_point]
         A[y_point] = sly[y_point]
         B[y_point] = 0.0
-        C1[y_point] = 0.0
-        C2[y_point] = 0.0
+        C1[y_point] = -slack
+        C2[y_point] = slack
 
     # Degenerate x (x is a point, y not): 1D in y.
     only_x = x_point & ~y_point
@@ -498,8 +414,9 @@ def _sigid_plane_batch(lx: np.ndarray, ux: np.ndarray,
         stacked_sub = np.stack(cands, axis=-1)
         A[only_x] = A_sub
         B[only_x] = B_sub
-        C1[only_x] = np.nanmin(stacked_sub, axis=-1)
-        C2[only_x] = np.nanmax(stacked_sub, axis=-1)
+        # F-2: |d f / d x| = sigma(y) <= 1 over the true wx < 1e-12.
+        C1[only_x] = np.nanmin(stacked_sub, axis=-1) - wx[only_x]
+        C2[only_x] = np.nanmax(stacked_sub, axis=-1) + wx[only_x]
 
     return A, B, C1, C2
 
@@ -508,59 +425,39 @@ def _sigid_plane_batch(lx: np.ndarray, ux: np.ndarray,
 
 
 def _c1c2_sigtanh(A, B, lx, ux, ly, uy):
-    """Exact min/max of g(x, y) = sigma(x) tanh(y) - A x - B y over the box."""
+    """Min/max of g(x, y) = sigma(x) tanh(y) - A x - B y over the box
+    (scalar transcription). Corners as Python floats with outward eta;
+    stationary-point candidates via the shared certified interval
+    routines (cert_rnn.certified) on 1-element arrays — the interval
+    logic is deliberately implemented once."""
+    from cert_rnn.certified import (
+        eta_outward,
+        sigtanh_hedge_candidates,
+        sigtanh_interior_candidates,
+        sigtanh_vedge_candidates,
+    )
 
     def g(x, y):
         return _sigmoid(x) * np.tanh(y) - A * x - B * y
 
-    cands = [g(lx, ly), g(lx, uy), g(ux, ly), g(ux, uy)]
-
-    # vertical edges: sigma(x_e) tanh'(y) = B  =>  tanh(y)^2 = 1 - B/sigma(x_e)
-    for x_e in (lx, ux):
-        s_xe = _sigmoid(x_e)
-        if s_xe > 1e-15:
-            ratio = B / s_xe
-            if 1e-12 < ratio < 1 - 1e-12:
-                t = np.sqrt(1 - ratio)
-                for tv in (-t, t):
-                    if abs(tv) < 1:
-                        y_crit = np.arctanh(tv)
-                        if ly <= y_crit <= uy:
-                            cands.append(g(x_e, y_crit))
-
-    # horizontal edges: sigma'(x) tanh(y_e) = A  =>  p^2 - p + A/tanh(y_e) = 0
-    for y_e in (ly, uy):
-        ty = np.tanh(y_e)
-        if abs(ty) > 1e-15:
-            ratio = A / ty
-            if 1e-12 < ratio < 0.25 - 1e-12:
-                disc = 1 - 4 * ratio
-                if disc > 0:
-                    s = np.sqrt(disc)
-                    for p in ((1 - s) / 2, (1 + s) / 2):
-                        if 1e-12 < p < 1 - 1e-12:
-                            x_crit = np.log(p / (1 - p))
-                            if lx <= x_crit <= ux:
-                                cands.append(g(x_crit, y_e))
-
-    # interior critical points: quartic in p = sigma(x)
-    coefs = [1.0, -(2.0 + B), (1.0 + 2.0 * B), -B, -(A ** 2)]
-    roots = np.roots(coefs)
-    real_roots = roots[np.abs(roots.imag) < 1e-10].real
-    for p in real_roots:
-        if 1e-12 < p < 1 - 1e-12:
-            x_crit = np.log(p / (1 - p))
-            if x_crit < lx - 1e-12 or x_crit > ux + 1e-12:
-                continue
-            ratio_y = A / (p * (1 - p))
-            if abs(ratio_y) >= 1 - 1e-12:
-                continue
-            y_crit = np.arctanh(ratio_y)
-            if y_crit < ly - 1e-12 or y_crit > uy + 1e-12:
-                continue
-            cands.append(g(x_crit, y_crit))
-
-    return float(min(cands)), float(max(cands))
+    a1 = np.array([A]); b1 = np.array([B])
+    lx1 = np.array([lx]); ux1 = np.array([ux]); ly1 = np.array([ly]); uy1 = np.array([uy])
+    eta = float(eta_outward(a1, b1, lx1, ux1, ly1, uy1)[0])
+    corners = [g(lx, ly), g(lx, uy), g(ux, ly), g(ux, uy)]
+    los = [c - eta for c in corners]
+    his = [c + eta for c in corners]
+    for x_e in (lx1, ux1):
+        lo, hi = sigtanh_vedge_candidates(a1, b1, ly1, uy1, x_e)
+        los += [v for v in lo[0] if not np.isnan(v)]
+        his += [v for v in hi[0] if not np.isnan(v)]
+    for y_e in (ly1, uy1):
+        lo, hi = sigtanh_hedge_candidates(a1, b1, lx1, ux1, y_e)
+        los += [v for v in lo[0] if not np.isnan(v)]
+        his += [v for v in hi[0] if not np.isnan(v)]
+    lo, hi = sigtanh_interior_candidates(a1, b1, lx1, ux1, ly1, uy1)
+    los += [v for v in lo[0] if not np.isnan(v)]
+    his += [v for v in hi[0] if not np.isnan(v)]
+    return float(min(los)), float(max(his))
 
 
 def _sigtanh_plane(lx, ux, ly, uy):
@@ -569,13 +466,16 @@ def _sigtanh_plane(lx, ux, ly, uy):
     tly, tuy = np.tanh(ly), np.tanh(uy)
     wx, wy = ux - lx, uy - ly
 
+    # F-2: sub-1e-12 widths are treated as points; widen outward by the
+    # Lipschitz bound over the collapsed extent (|df/dx| <= 1/4, |df/dy| <= 1).
     if wx < 1e-12 and wy < 1e-12:
         f = sl * tly
-        return 0.0, 0.0, f, f
+        slack = 0.25 * wx + wy
+        return 0.0, 0.0, f - slack, f + slack
     if wy < 1e-12:
         ty = tly
         if abs(ty) < 1e-15:
-            return 0.0, 0.0, 0.0, 0.0
+            return 0.0, 0.0, -wy, wy
         a_sig, c1s, c2s = _sigmoid_plane_1d(lx, ux)
         A = ty * a_sig
         B = 0.0
@@ -585,11 +485,11 @@ def _sigtanh_plane(lx, ux, ly, uy):
         else:
             C1 = ty * c2s
             C2 = ty * c1s
-        return A, B, C1, C2
+        return A, B, C1 - wy, C2 + wy
     if wx < 1e-12:
         sx = sl
         if abs(sx) < 1e-15:
-            return 0.0, 0.0, 0.0, 0.0
+            return 0.0, 0.0, -0.25 * wx, 0.25 * wx
         b_th, c1t, c2t = _tanh_plane_1d(ly, uy)
         A = 0.0
         B = sx * b_th
@@ -599,7 +499,7 @@ def _sigtanh_plane(lx, ux, ly, uy):
         else:
             C1 = sx * c2t
             C2 = sx * c1t
-        return A, B, C1, C2
+        return A, B, C1 - 0.25 * wx, C2 + 0.25 * wx
 
     A = (su - sl) * (tly + tuy) / (2 * wx)
     B = (sl + su) * (tuy - tly) / (2 * wy)
@@ -626,16 +526,12 @@ def bilinear_sigmoid_tanh(
     shared_ids, (V_x, V_y) = align_pred_space(z_x, z_y)
     lb_x, ub_x = z_x.get_ranges()
     lb_y, ub_y = z_y.get_ranges()
-    # Batched vectorisation across K has ~250 us fixed overhead; for K < 8
-    # the scalar loop wins. Crossover measured empirically.
-    if K < 8:
-        A = np.empty(K); B = np.empty(K); C1 = np.empty(K); C2 = np.empty(K)
-        for k in range(K):
-            A[k], B[k], C1[k], C2[k] = _sigtanh_plane(
-                lb_x[k], ub_x[k], lb_y[k], ub_y[k]
-            )
-    else:
-        A, B, C1, C2 = _sigtanh_plane_batch(lb_x, ub_x, lb_y, ub_y)
+    # Since the certified candidate machinery (cert_rnn.certified) is
+    # vectorised, the batched plane is at least as fast as the scalar loop
+    # at every K (measured: equal at K=1, 4x faster at K=4). The scalar
+    # transcription is kept for the differential canary
+    # (tests/soundness/test_scalar_batch_diff.py).
+    A, B, C1, C2 = _sigtanh_plane_batch(lb_x, ub_x, lb_y, ub_y)
     if _BILINEAR_MODE == "zono":
         from cert_rnn.tier1 import c1c2_over_zono
         C1, C2 = c1c2_over_zono("sigtanh", A, B, z_x.c, z_y.c, V_x, V_y,
@@ -651,33 +547,30 @@ def bilinear_sigmoid_tanh(
 
 
 def _c1c2_sigid(A, B, lx, ux, ly, uy):
-    """Exact min/max of g(x, y) = x sigma(y) - A x - B y over the box.
+    """Min/max of g(x, y) = x sigma(y) - A x - B y over the box (scalar
+    transcription).
 
     Hessian det = -sigma'(y)^2 <= 0, so interior has only saddles.
-    Extrema lie on the boundary:
-      - 4 corners
-      - vertical edges x = const != 0: stationary in y where
-        x * sigma'(y) = B; solve p^2 - p + B/x = 0, p = sigma(y).
-      - horizontal edges y = const: g linear in x, no interior critical pt.
+    Extrema lie on the boundary: 4 corners (outward by eta) and the
+    vertical-edge stationary points x_e sigma'(y) = B (certified
+    intervals via cert_rnn.certified); horizontal edges are linear in x.
     """
+    from cert_rnn.certified import eta_outward, sigid_vedge_candidates
 
     def g(x, y):
         return x * _sigmoid(y) - A * x - B * y
 
-    cands = [g(lx, ly), g(lx, uy), g(ux, ly), g(ux, uy)]
-    for x_e in (lx, ux):
-        if abs(x_e) < 1e-15:
-            continue
-        ratio = B / x_e
-        if 0 < ratio < 0.25 - 1e-12:
-            disc = 1 - 4 * ratio
-            s = np.sqrt(disc)
-            for p in ((1 - s) / 2, (1 + s) / 2):
-                if 0 < p < 1:
-                    y_crit = np.log(p / (1 - p))
-                    if ly <= y_crit <= uy:
-                        cands.append(g(x_e, y_crit))
-    return float(min(cands)), float(max(cands))
+    a1 = np.array([A]); b1 = np.array([B])
+    lx1 = np.array([lx]); ux1 = np.array([ux]); ly1 = np.array([ly]); uy1 = np.array([uy])
+    eta = float(eta_outward(a1, b1, lx1, ux1, ly1, uy1)[0])
+    corners = [g(lx, ly), g(lx, uy), g(ux, ly), g(ux, uy)]
+    los = [c - eta for c in corners]
+    his = [c + eta for c in corners]
+    for x_e in (lx1, ux1):
+        lo, hi = sigid_vedge_candidates(a1, b1, ly1, uy1, x_e)
+        los += [v for v in lo[0] if not np.isnan(v)]
+        his += [v for v in hi[0] if not np.isnan(v)]
+    return float(min(los)), float(max(his))
 
 
 def _sigid_plane(lx, ux, ly, uy):
@@ -686,8 +579,10 @@ def _sigid_plane(lx, ux, ly, uy):
     wx, wy = ux - lx, uy - ly
 
     if wy < 1e-12:
-        # y is a point: f = x * sigma(ly) is exact affine in x. Zero error.
-        return sly, 0.0, 0.0, 0.0
+        # y is a point: f = x * sigma(ly) is affine in x. F-2: widen by
+        # the Lipschitz bound |x| sigma'(y) <= |x|/4 over the true wy.
+        slack = 0.25 * max(abs(lx), abs(ux)) * wy
+        return sly, 0.0, -slack, slack
     if wx < 1e-12:
         # x is a point: f(x, y) = lx * sigma(y), 1D in y.
         A = sly
@@ -707,7 +602,8 @@ def _sigid_plane(lx, ux, ly, uy):
                         y_crit = np.log(p / (1 - p))
                         if ly <= y_crit <= uy:
                             cands.append(g(y_crit))
-        return A, B, float(min(cands)), float(max(cands))
+        # F-2: |df/dx| = sigma(y) <= 1 over the true wx < 1e-12.
+        return A, B, float(min(cands)) - wx, float(max(cands)) + wx
 
     A = (sly + suy) / 2
     B = (lx + ux) * (suy - sly) / (2 * wy)
@@ -733,14 +629,7 @@ def bilinear_sigmoid_identity(
     shared_ids, (V_x, V_y) = align_pred_space(z_x, z_y)
     lb_x, ub_x = z_x.get_ranges()
     lb_y, ub_y = z_y.get_ranges()
-    if K < 8:
-        A = np.empty(K); B = np.empty(K); C1 = np.empty(K); C2 = np.empty(K)
-        for k in range(K):
-            A[k], B[k], C1[k], C2[k] = _sigid_plane(
-                lb_x[k], ub_x[k], lb_y[k], ub_y[k]
-            )
-    else:
-        A, B, C1, C2 = _sigid_plane_batch(lb_x, ub_x, lb_y, ub_y)
+    A, B, C1, C2 = _sigid_plane_batch(lb_x, ub_x, lb_y, ub_y)   # see sigtanh note
     if _BILINEAR_MODE == "zono":
         from cert_rnn.tier1 import c1c2_over_zono
         C1, C2 = c1c2_over_zono("sigid", A, B, z_x.c, z_y.c, V_x, V_y,
