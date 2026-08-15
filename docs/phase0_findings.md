@@ -257,6 +257,57 @@ on sigtanh; met on sigid.** The R-tests xfail on the three signatures and
 will hard-fail on any new one — that is the harness Tier 1 is written
 against. Ledger row added (soundness.md S15).
 
+## H. ZRLT Tier 1 — built as a cell cover, not a vertex/edge candidate swap
+
+**Deviation from the plan, flagged.** The plan said: swap box corners +
+box-edge stationary points for zonotope vertices + zonotope-edge stationary
+points. Along a box edge one coordinate is constant, so the stationary
+condition decouples and has a closed form — that is why the baseline
+enumeration is structurally complete. Along a general zonotope edge both
+x and y vary linearly and d·∇g = 0 has **no closed form**; the Measurement-1
+script found those roots by sample-scan + bisection, which is fine for a
+measurement (independently validated, §E.2) but structurally incomplete as
+bounding code (two roots between adjacent samples are missed silently, and
+the miss is inward). Making it rigorous means interval-arithmetic root
+isolation on transcendental compositions — a new soundness surface.
+
+**Construction used** (`src/cert_rnn/tier1.py`, mode switch
+`transformers.set_bilinear_mode("zono")` / `bilinear_mode(...)` context
+manager, default "box"): cover the joint zonotope Z with the cells of an
+n×n axis-aligned grid over the operand box that intersect Z (separating-axis
+test against Z's exact edge normals — the perpendiculars of its generators —
+with outward tolerance), and evaluate the EXISTING closed-form box
+enumeration on every admitted cell with the same (A, B):
+C1 = min over cells, C2 = max over cells.
+- Sound: admitted cells ⊇ Z ⊇ reachable set; each cell's extremum is exact
+  (same code the R-tests audit); tested directly by the covering property
+  (every eps-space sample incl. all sign corners and edge points lands in an
+  admitted cell — `test_tier1.py`, corr ∈ {0, .7, .95, 1}, n ∈ {4,12,24}).
+- Never looser than the box (union ⊆ box): T-2.2 asserted on the raw,
+  unclamped values — 0 violations, 2 700 coordinates tightened.
+- Nothing new enumerated: inherits F-1/F-2/F-3 exactly (Level-1 in zono
+  mode xfails on the same F-1 signature at 1.7e-6 and nothing else); every
+  R-test, LP-feasibility audit, `lstm_step`, verify and red-team test passes
+  under zono mode. R-1 (same (A,B) on sub-boxes) is literally this
+  construction's soundness test.
+- Tilt (A, B) unchanged (E.3).
+- Ledger row S16 added.
+
+**Recovery vs grid resolution** (`research/phase1_tier1_recovery.py`,
+fraction of the exact box→Z gap improvement recovered, gap-weighted):
+
+| combo | n=8 | n=16 | n=32 | exact-Z removal |
+|---|---|---|---|---|
+| ieee9-S single_frame | 0.62 | **0.80** | 0.89 | 38.1% |
+| synth-H16 single_frame | 0.69 | **0.85** | 0.93 | 54.4% |
+| ieee9-S multi_frame | 0.19 | **0.33** | 0.51 | 5.5% |
+| synth-H16 multi_frame | 0.30 | **0.45** | 0.68 | 21.0% |
+
+Default n=16; fat joint sets (multi-frame) are covered less efficiently by
+axis-aligned cells but also had least to recover. A cheap skip
+(closed-form area ratio > 0.9 ⇒ box is near-exact ⇒ keep box result) trades
+nothing measurable for time.
+
 ## Open items (next steps per plan)
 
 - Vertex enumeration promotion + property tests (step 3).

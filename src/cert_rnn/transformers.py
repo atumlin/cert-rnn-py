@@ -35,6 +35,42 @@ def _sigmoid(x):
     return 1.0 / (1.0 + np.exp(-x))
 
 
+# ---------- bilinear mode (baseline box vs ZRLT Tier 1) ----------
+
+_BILINEAR_MODE = "box"   # "box": Cert-RNN baseline; "zono": Tier 1
+
+
+def set_bilinear_mode(mode: str) -> None:
+    """Select the bilinear residual-offset method globally.
+    "box"  -- exact residual extrema over the operand box (baseline).
+    "zono" -- ZRLT Tier 1: extrema over a grid cover of the joint 2-D
+              zonotope (cert_rnn.tier1); never looser than "box"."""
+    global _BILINEAR_MODE
+    if mode not in ("box", "zono"):
+        raise ValueError(f"unknown bilinear mode {mode!r}")
+    _BILINEAR_MODE = mode
+
+
+def get_bilinear_mode() -> str:
+    return _BILINEAR_MODE
+
+
+class bilinear_mode:
+    """Context manager: `with bilinear_mode("zono"): ...`."""
+
+    def __init__(self, mode: str):
+        self.mode = mode
+
+    def __enter__(self):
+        self.prev = get_bilinear_mode()
+        set_bilinear_mode(self.mode)
+        return self
+
+    def __exit__(self, *exc):
+        set_bilinear_mode(self.prev)
+        return False
+
+
 def _fresh_block(C1: np.ndarray, C2: np.ndarray, alloc: PredAllocator):
     """Fresh-generator block for a transformer output, with zero-width
     pruning: elements whose exact residual spread is zero (point inputs,
@@ -600,6 +636,10 @@ def bilinear_sigmoid_tanh(
             )
     else:
         A, B, C1, C2 = _sigtanh_plane_batch(lb_x, ub_x, lb_y, ub_y)
+    if _BILINEAR_MODE == "zono":
+        from cert_rnn.tier1 import c1c2_over_zono
+        C1, C2 = c1c2_over_zono("sigtanh", A, B, z_x.c, z_y.c, V_x, V_y,
+                                lb_x, ub_x, lb_y, ub_y, C1, C2)
     new_c = A * z_x.c + B * z_y.c + 0.5 * (C1 + C2)
     scaled_V = A[:, None] * V_x + B[:, None] * V_y
     fresh_V, fresh_ids = _fresh_block(C1, C2, alloc)
@@ -701,6 +741,10 @@ def bilinear_sigmoid_identity(
             )
     else:
         A, B, C1, C2 = _sigid_plane_batch(lb_x, ub_x, lb_y, ub_y)
+    if _BILINEAR_MODE == "zono":
+        from cert_rnn.tier1 import c1c2_over_zono
+        C1, C2 = c1c2_over_zono("sigid", A, B, z_x.c, z_y.c, V_x, V_y,
+                                lb_x, ub_x, lb_y, ub_y, C1, C2)
     new_c = A * z_x.c + B * z_y.c + 0.5 * (C1 + C2)
     scaled_V = A[:, None] * V_x + B[:, None] * V_y
     fresh_V, fresh_ids = _fresh_block(C1, C2, alloc)
