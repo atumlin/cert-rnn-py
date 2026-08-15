@@ -435,7 +435,7 @@ floor/separation. Nightly R-1 child-side slack fell from max 0.125 to
 
 | test | checks | sigtanh scalar | sigtanh batch | sigid scalar | sigid batch |
 |---|---|---|---|---|---|
-| R-1 subdivision (depth 4) | 2 139 875 | (running) | **0** | (running) | **0** |
+| R-1 subdivision (depth 4) | 2 139 875 | (running, long) | **0** | **0** | **0** |
 | R-3 grid oracle (301², refined) | 25 175 boxes | **0** | **0** | **0** | **0** |
 
 Near-degenerate adversarial stratum (6 000 boxes) and wide-saturated
