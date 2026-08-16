@@ -641,6 +641,54 @@ effort at the measured 22-39% per-product residual. Revisit only if a
 future benchmark shows Z4 coupling in the 0.3-0.8 band (partial
 correlation) with material cell widths.
 
+## N. Slack split: grid loss vs single-plane loss (decision measurement)
+
+`research/phase2_slack_split.py` (562 gate instances, Tier-1 pipeline
+operands, tilt held at shipped values, seed 20260818). Three bounds per
+instance: (a) exact residual extrema over Z (validated geometric machinery
++ samples + projected-gradient ascent); (b) the shipped n=16 grid bound;
+(c) the tightest plane pair over Z with INDEPENDENT slopes — the joint LP
+min max_Z(U-L) s.t. L <= f <= U, cut against a dense sample (sample-based,
+NOT certified; missing constraints can only shrink gap(c), i.e. OVERSTATE
+the single-plane loss). Note the one-sided "minimize offset" formulation
+does not compose into a comparable quantity (at the shipped tilt each
+one-sided optimal error equals gap(a)); the joint min-max-width LP admits
+the shared-tilt pair as a feasible point, so gap(c) <= gap(a) by
+construction. Ordering gap(c) <= gap(a) <= gap(b) asserted on every
+instance: zero violations.
+
+| combo | grid loss (b-a)/b | single-plane loss (a-c)/b | plane-pair irreducible c/b |
+|---|---|---|---|
+| ieee9-S multi_frame | 3.8% | 5.9% | 90.3% |
+| ieee9-S single_frame | 15.0% | 2.2% | 82.7% |
+| synth-H16 multi_frame | 14.0% | 1.2% | 84.8% |
+| synth-H16 single_frame | 13.6% | 0.5% | 85.9% |
+
+**The headline is the third column, which the binary question did not
+anticipate: the shipped Tier-1 bound is already within 10-17% of the best
+ANY plane-pair method — shared or independent slopes, any domain that
+returns two planes — can achieve over the true joint set.** Grid loss
+(4-15%) exceeds single-plane loss (0.5-6%) in three of four combos, but
+both are small against the plane-pair floor gap(c), which is the intrinsic
+nonlinearity of sigma*tanh over Z: no refinement of THIS transformer class
+touches it. Reconciliation with §M's 22-39% cell-level residual: that
+figure additionally contains the gap between the plane-pair floor and the
+true product range, plus upstream accumulated width — neither is
+addressable by grid refinement or independent slopes at the gate.
+
+**Judgement.** By the stated rule (grid vs single-plane) grid dominates,
+but its ceiling is 4-15% of gate gaps — after gate-to-radius transfer,
+realistically single-digit percent radius on the one benchmark where gate
+error matters at all. As a tightness play, adaptive refinement is
+marginal; its real value would be COST (cell-count-dominated at ~350k
+admitted cells/reach), with the tightness as a bonus. Single-plane domain
+change is not justified by 0.5-5.9%. Recommendation: stop improving and
+write, with the sharpened claim that Tier 1 sits within 10-17% of the
+plane-pair optimum at every gate; polynomial zonotopes / back-substitution
+move to future work as the only routes past the plane-pair floor, and
+adaptive refinement is noted as a cost optimization if the multipliers
+ever matter in practice.
+
 ## Open items (next steps per plan)
 
 - Vertex enumeration promotion + property tests (step 3).
