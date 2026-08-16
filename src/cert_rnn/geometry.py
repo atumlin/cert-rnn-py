@@ -62,6 +62,57 @@ def zono2d_vertices(c, G, angle_tol: float = 1e-9) -> np.ndarray:
     return chain  # segment: 2 vertices
 
 
+def merge_generators_2d(G: np.ndarray, angle_tol: float = 1e-3):
+    """Merge near-parallel 2-D generators within `angle_tol` radians,
+    OUTWARD: returns (G_merged, n_directions) with the merged zonotope
+    guaranteed to CONTAIN the original.
+
+    Each group with representative unit direction u is replaced by the
+    aligned sum s = sum_i sign(g_i . u) g_i plus, when the group is not
+    exactly parallel, a slack pair of axis-aligned generators of magnitude
+    rho = sum_i |g_i - (g_i . u_s) u_s| (perpendicular residue w.r.t. the
+    direction of s), rounded outward by 2 ulps. Containment: each segment
+    [-g_i, g_i] lies within [-(g_i.u_s) u_s, +] extended by its residue, so
+    the group's Minkowski sum lies in [-s, s] (+) box(rho); a box cover of
+    the residue disc is itself outward. Exactly parallel groups merge with
+    zero slack (exact)."""
+    G = np.asarray(G, dtype=np.float64).reshape(-1, 2)
+    nrm = np.hypot(G[:, 0], G[:, 1])
+    G = G[nrm > 0.0]
+    if G.shape[0] == 0:
+        return G, 0
+    flip = (G[:, 1] < 0) | ((G[:, 1] == 0) & (G[:, 0] < 0))
+    Gc = np.where(flip[:, None], -G, G)
+    ang = np.arctan2(Gc[:, 1], Gc[:, 0])
+    order = np.argsort(ang)
+    Gc = Gc[order]; ang = ang[order]
+    groups = []
+    start = 0
+    for i in range(1, Gc.shape[0] + 1):
+        if i == Gc.shape[0] or ang[i] - ang[start] > angle_tol:
+            groups.append(Gc[start:i])
+            start = i
+    out = []
+    rho_total = 0.0
+    for grp in groups:
+        s = grp.sum(axis=0)   # canonicalized: all in upper half-plane, aligned
+        ns = float(np.hypot(*s))
+        if ns == 0.0:
+            rho_total += float(np.hypot(grp[:, 0], grp[:, 1]).sum())
+            continue
+        us = s / ns
+        perp = grp - np.outer(grp @ us, us)
+        rho = float(np.hypot(perp[:, 0], perp[:, 1]).sum())
+        out.append(s)
+        rho_total += rho
+    n_dirs = len(out)
+    if rho_total > 0.0:
+        rho_total = np.nextafter(np.nextafter(rho_total, np.inf), np.inf)
+        out.append(np.array([rho_total, 0.0]))
+        out.append(np.array([0.0, rho_total]))
+    return np.asarray(out).reshape(-1, 2), n_dirs
+
+
 def polygon_area(verts: np.ndarray) -> float:
     """Shoelace area of a CCW polygon, (m, 2)."""
     if verts.shape[0] < 3:

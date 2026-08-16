@@ -396,14 +396,26 @@ def _init_worker(payload: dict) -> None:
 
 
 def _worker_probe(job):
-    """job = (frame_or_None, eps) -> bool for the payload's spec."""
+    """job = (frame_or_None, eps) or (frame_or_None, eps, mode_override).
+    mode_override temporarily forces the bilinear mode for this probe
+    (used by the Tier-1 round-cutover schedule)."""
+    from cert_rnn.transformers import bilinear_mode
+
     P = _WORKER_PAYLOAD
-    t, eps = job
-    if P["spec"] == "c":
-        return spec_c_holds(P["encoder"], P["decoder"], P["head"], P["x"], eps,
-                            P["tau"], P["threat_model"], t)
-    return spec_a_margin(P["model_dict"], P["x"], eps, P["true_class"],
-                         P["threat_model"], t)
+    t, eps = job[0], job[1]
+    mode = job[2] if len(job) > 2 else None
+
+    def probe():
+        if P["spec"] == "c":
+            return spec_c_holds(P["encoder"], P["decoder"], P["head"], P["x"],
+                                eps, P["tau"], P["threat_model"], t)
+        return spec_a_margin(P["model_dict"], P["x"], eps, P["true_class"],
+                             P["threat_model"], t)
+
+    if mode is None:
+        return probe()
+    with bilinear_mode(mode):
+        return probe()
 
 
 def _search_frames(
@@ -414,76 +426,87 @@ def _search_frames(
     search: str,
     probes: int,
     n_workers: int,
+    zono_last_rounds: int | None = None,
 ) -> tuple[np.ndarray, int]:
     """Run the epsilon search for every frame in `frames` (or [None] for
     multi_frame). search: "bisect" (Algorithm 1) or "kary". n_workers > 1
-    evaluates probes in a process pool: with "kary" all frames advance in
-    lockstep so each round submits len(frames) * probes jobs at once.
+    evaluates probes in a process pool; the serial path runs the SAME
+    lockstep walk through a serial mapper, so the two are identical by
+    construction (and asserted bit-identical by the regression tests).
+
+    zono_last_rounds (Tier-1 cutover, sound-but-may-lose-tightness): when
+    the session bilinear mode is "zono", probes in all but the LAST
+    `zono_last_rounds` rounds are evaluated in "box" mode. Both modes are
+    sound, so any mixed schedule certifies only true radii; early box
+    rejections can steer the walk lower, so the result is >= the all-box
+    radius and <= the all-zono radius. None = current mode everywhere.
+
     Returns (per-frame radii, sequential rounds)."""
     from cert_rnn.transformers import get_bilinear_mode
 
-    payload = dict(payload, bilinear_mode=get_bilinear_mode())
+    session_mode = get_bilinear_mode()
+    payload = dict(payload, bilinear_mode=session_mode)
     if search not in ("bisect", "kary"):
         raise ValueError(f"unknown search {search!r}")
-    if n_workers <= 1:
-        _init_worker(payload)
-        radii = np.zeros(len(frames))
-        depth = 0
-        for i, t in enumerate(frames):
-            if search == "bisect":
-                radii[i] = bisect_epsilon(lambda e, _t=t: _worker_probe((_t, e)),
-                                          eps_init, n_iters)
-                depth = n_iters + 1
-            else:
-                radii[i], depth = kary_epsilon(
-                    lambda es, _t=t: [_worker_probe((_t, e)) for e in es],
-                    eps_init, n_iters, probes)
-        return radii, depth
 
-    from concurrent.futures import ProcessPoolExecutor
+    if search == "bisect":
+        total_rounds = n_iters + 1
+    else:
+        if eps_init < 0.5:
+            raise ValueError("kary requires eps_init >= 0.5")
+        total_rounds = len(_kary_rounds(n_iters + 1, probes))
 
-    with ProcessPoolExecutor(max_workers=n_workers, initializer=_init_worker,
-                             initargs=(payload,)) as ex:
+    def mode_for_round(r):   # r is 1-based
+        if (zono_last_rounds is None or session_mode != "zono"
+                or r > total_rounds - zono_last_rounds):
+            return None      # payload default
+        return "box"
+
+    def walk(mapper):
         if search == "bisect":
-            # one Algorithm-1 walk per frame, all frames in lockstep
             state = [{"eps": eps_init, "best": 0.0} for _ in frames]
+            r = 0
             for ell in range(2, n_iters + 2):
-                jobs = [(t, max(st["eps"], 0.0)) for t, st in zip(frames, state)]
-                oks = list(ex.map(_worker_probe, jobs))
-                for st, (t, e), ok in zip(state, jobs, oks):
-                    st["eps"] = e
+                r += 1
+                m = mode_for_round(r)
+                jobs = [(t, max(st["eps"], 0.0), m)
+                        for t, st in zip(frames, state)]
+                oks = mapper(jobs)
+                for st, jb, ok in zip(state, jobs, oks):
+                    e = jb[1]
                     if ok:
                         st["best"] = max(st["best"], e)
                         st["eps"] = e + 0.5 ** ell
                     else:
                         st["eps"] = e - 0.5 ** ell
-            jobs = [(t, st["eps"]) for t, st in zip(frames, state)]
-            oks = list(ex.map(_worker_probe, jobs))
-            for st, (t, e), ok in zip(state, jobs, oks):
-                if e > 0 and ok:
-                    st["best"] = max(st["best"], e)
-            return np.array([st["best"] for st in state]), n_iters + 1
-        if eps_init < 0.5:
-            raise ValueError("kary requires eps_init >= 0.5")
+            r += 1
+            m = mode_for_round(r)
+            jobs = [(t, st["eps"], m) for t, st in zip(frames, state)]
+            oks = mapper(jobs)
+            for st, jb, ok in zip(state, jobs, oks):
+                if jb[1] > 0 and ok:
+                    st["best"] = max(st["best"], jb[1])
+            return np.array([st["best"] for st in state]), total_rounds
+        # k-ary, lockstep across frames
         bits = n_iters + 1
         state = [{"lo": eps_init - 0.5, "hi": eps_init + 0.5, "best": 0.0}
                  for _ in frames]
-        n_rounds = 0
+        r = 0
         for b in _kary_rounds(bits, probes):
+            r += 1
+            mmode = mode_for_round(r)
             m = 2 ** b
             jobs = []
             owner = []
             for i, (t, st) in enumerate(zip(frames, state)):
                 step = (st["hi"] - st["lo"]) / m
                 for j in range(1, m):
-                    jobs.append((t, st["lo"] + j * step))
+                    jobs.append((t, st["lo"] + j * step, mmode))
                     owner.append(i)
-            oks = list(ex.map(_worker_probe, jobs,
-                              chunksize=max(1, len(jobs) // (4 * n_workers))))
-            n_rounds += 1
+            oks = mapper(jobs)
             per = {}
-            for (t, e), o, ok in zip(jobs, owner, oks):
-                per.setdefault(o, []).append((e, ok))
+            for jb, o, ok in zip(jobs, owner, oks):
+                per.setdefault(o, []).append((jb[1], ok))
             for i, st in enumerate(state):
                 probes_i = per.get(i, [])
                 new_lo, new_hi = st["lo"], st["hi"]
@@ -496,7 +519,19 @@ def _search_frames(
                         new_hi = e
                         break
                 st["lo"], st["hi"] = new_lo, new_hi
-        return np.array([st["best"] for st in state]), n_rounds
+        return np.array([st["best"] for st in state]), r
+
+    if n_workers <= 1:
+        _init_worker(payload)
+        return walk(lambda jobs: [_worker_probe(j) for j in jobs])
+
+    from concurrent.futures import ProcessPoolExecutor
+
+    with ProcessPoolExecutor(max_workers=n_workers, initializer=_init_worker,
+                             initargs=(payload,)) as ex:
+        return walk(lambda jobs: list(
+            ex.map(_worker_probe, jobs,
+                   chunksize=max(1, len(jobs) // (4 * n_workers)))))
 
 
 # ---------- certified radius (bisection over eps) ----------
@@ -512,6 +547,7 @@ def certify_radius_spec_a(
     search: str = "bisect",
     probes: int = 15,
     n_workers: int = 1,
+    zono_last_rounds: int | None = None,
 ) -> tuple[float, np.ndarray | None]:
     """Epsilon search for Spec A.
 
@@ -527,9 +563,10 @@ def certify_radius_spec_a(
     if threat_model == "single_frame":
         frames = list(range(x_seq.shape[0]))
         per_frame, _ = _search_frames(payload, frames, eps_init, n_iters,
-                                      search, probes, n_workers)
+                                      search, probes, n_workers, zono_last_rounds)
         return float(per_frame.min()), per_frame
-    r, _ = _search_frames(payload, [None], eps_init, n_iters, search, probes, n_workers)
+    r, _ = _search_frames(payload, [None], eps_init, n_iters, search, probes,
+                          n_workers, zono_last_rounds)
     return float(r[0]), None
 
 
@@ -545,6 +582,7 @@ def certify_radius_spec_c(
     search: str = "bisect",
     probes: int = 15,
     n_workers: int = 1,
+    zono_last_rounds: int | None = None,
 ) -> tuple[float, np.ndarray | None]:
     """Epsilon search for Spec C. Same shape/options as certify_radius_spec_a."""
     payload = {"spec": "c", "encoder": encoder, "decoder": decoder, "head": head,
@@ -552,7 +590,8 @@ def certify_radius_spec_c(
     if threat_model == "single_frame":
         frames = list(range(x_anchor.shape[0]))
         per_frame, _ = _search_frames(payload, frames, eps_init, n_iters,
-                                      search, probes, n_workers)
+                                      search, probes, n_workers, zono_last_rounds)
         return float(per_frame.min()), per_frame
-    r, _ = _search_frames(payload, [None], eps_init, n_iters, search, probes, n_workers)
+    r, _ = _search_frames(payload, [None], eps_init, n_iters, search, probes,
+                          n_workers, zono_last_rounds)
     return float(r[0]), None

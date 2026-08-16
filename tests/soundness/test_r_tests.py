@@ -41,6 +41,36 @@ FP_TOL = 1e-13         # relative; violations below this are fp noise
 # child-looser-than-parent excess; larger = enclosure blow-up.
 CHILD_SLACK_TOL = 1e-6
 RETIRE_KNOWN = True    # F-1/F-2/F-3 fixed: known signatures no longer xfail
+SLACK_RATIO_ALERT = 30.0   # observed child slack / predicted enclosure width
+
+
+def _predicted_enclosure_width(kind, A, B, lx, ux, ly, uy):
+    """Max certified candidate-interval width (hi - lo) on this box plus
+    eta: the enclosure slack the certified machinery itself predicts."""
+    from cert_rnn.certified import (
+        eta_outward,
+        sigid_vedge_candidates,
+        sigtanh_hedge_candidates,
+        sigtanh_interior_candidates,
+        sigtanh_vedge_candidates,
+    )
+    a = np.array([A]); b = np.array([B])
+    L = [np.array([v]) for v in (lx, ux, ly, uy)]
+    widths = [float(eta_outward(a, b, *L)[0])]
+    if kind == "sigtanh":
+        for x_e in (L[0], L[1]):
+            lo, hi = sigtanh_vedge_candidates(a, b, L[2], L[3], x_e)
+            widths += list((hi - lo)[0][np.isfinite((hi - lo)[0])])
+        for y_e in (L[2], L[3]):
+            lo, hi = sigtanh_hedge_candidates(a, b, L[0], L[1], y_e)
+            widths += list((hi - lo)[0][np.isfinite((hi - lo)[0])])
+        lo, hi = sigtanh_interior_candidates(a, b, *L)
+        widths += list((hi - lo)[0][np.isfinite((hi - lo)[0])])
+    else:
+        for x_e in (L[0], L[1]):
+            lo, hi = sigid_vedge_candidates(a, b, L[2], L[3], x_e)
+            widths += list((hi - lo)[0][np.isfinite((hi - lo)[0])])
+    return max(widths)
 COND_BINS = (0, 10, 100, 1e3, 1e4, 1e5, np.inf)
 
 # ---------- shared helpers ----------
@@ -160,6 +190,7 @@ class ViolationLedger:
         self.n_checked = 0
         self.known = []   # parallel to rows
         self.child_slack = []   # R-1 looseness-side excesses (informational)
+        self.slack_ratio = []   # (observed/predicted, observed_rel, predicted)
 
     def add(self, stratum, cond, rel, detail, f1=False, known=""):
         self.rows.append((stratum, _cond_bin(cond), float(rel), detail))
@@ -173,6 +204,13 @@ class ViolationLedger:
         """Raise per soundness policy: nothing -> pass; only known-signature
         violations -> xfail with the full magnitude report; anything else
         -> fail loudly."""
+        if self.slack_ratio:
+            rr = max(x[0] for x in self.slack_ratio)
+            if rr > SLACK_RATIO_ALERT:
+                pytest.fail(f"R-1 child slack exceeds predicted enclosure width "
+                            f"by {rr:.3g}x (> {SLACK_RATIO_ALERT}x): the slack is "
+                            f"NOT explained by the certified intervals.\n"
+                            + self.report())
         if not self.rows:
             return
         rep = self.report()
@@ -194,6 +232,13 @@ class ViolationLedger:
             lines.append(f"  [info] child-looser-than-parent (certified enclosure "
                          f"slack on sub-box edges): n={cs.size} max={cs.max():.3e} "
                          f"med={np.median(cs):.3e}")
+        if self.slack_ratio:
+            rr = np.array([x[0] for x in self.slack_ratio])
+            lines.append(f"  [info] slack/predicted-enclosure ratio: n={rr.size} "
+                         f"max={rr.max():.3g} p95={np.percentile(rr, 95):.3g} "
+                         f"med={np.median(rr):.3g}")
+            worst = max(self.slack_ratio, key=lambda x: x[0])
+            lines.append(f"         worst: obs_rel={worst[1]:.3e} predicted={worst[2]:.3e}")
         bins = {}
         for (s, b, r, _), f in zip(self.rows, self.f1_flags):
             bins.setdefault((s, b), []).append((r, f))
@@ -261,6 +306,16 @@ def _run_r1(kind, path, boxes, depth):
                                 f"{name} child-looser-than-budget box=({plx[i]:.6g},"
                                 f"{pux[i]:.6g},{ply[i]:.6g},{puy[i]:.6g})")
                     led.child_slack.extend(rel[rel > FP_TOL].tolist())
+                    # sensitivity restoration: observed slack vs the
+                    # PREDICTED certified-enclosure width on that box. A
+                    # slack far above prediction is suspicious even under
+                    # the flat budget.
+                    for i in np.flatnonzero(rel > 10 * FP_TOL):
+                        pred = _predicted_enclosure_width(
+                            kind, A[i], B[i], plx[i], pux[i], ply[i], puy[i])
+                        led.slack_ratio.append(
+                            (float(rel[i] * sc[i] / max(pred, 1e-300)),
+                             float(rel[i]), float(pred)))
             cur = nxt
     return led
 
@@ -448,9 +503,15 @@ def test_t04_degenerate_boxes(kind):
 
 # ---------- nightly-scale ----------
 
+# Nightly R-1 runs the BATCH path only: the scalar transcription is
+# dispatch-retired (test-only canary), shares all candidate logic with
+# batch via cert_rnn.certified, and 2.1M boxes through its Python loop
+# blew the time budget twice. The independent nightly reference is now
+# tests/soundness/test_hp_reference.py (mpmath, genuinely independent
+# arithmetic), not the second transcription.
 @pytest.mark.nightly
 @pytest.mark.parametrize("kind", ["sigtanh", "sigid"])
-@pytest.mark.parametrize("path", ["scalar", "batch"])
+@pytest.mark.parametrize("path", ["batch"])
 def test_r1_subdivision_nightly(kind, path):
     rng = np.random.default_rng(SEED + 1)
     P = _params(True)

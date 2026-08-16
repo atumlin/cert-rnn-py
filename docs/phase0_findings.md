@@ -530,6 +530,73 @@ zono A 274.7 s = 4.7x; the multiplier is a per-reach property that
 parallelism leaves unchanged. Multi-frame ieee9: 11.4x (28.0 / 2.5 s).
 Synth-H16 multi-frame: 65× (203 / 3.1 s) — at the large probe eps of the search the joint sets are fat, most of the 16×16 cells are admitted and the certified enumeration runs on ~4 000 cells per bilinear call; the k-ary Tier-1 row for this setting did not finish in >1 h and was stopped. Synth single-frame Tier 1: from the per-frame e2e data, 11–87× per frame (median ~30×). These multipliers are per-reach properties and are unchanged by 2a/2b; they are the cost story that generator merging / selective application / adaptive refinement (deferred by instruction) must address — and note Tier 1 buys nothing on synth (§I) so selective application would switch it off there entirely.
 
+## L. Cost guards, direction merge, nightly canary replacement (cleanup round)
+
+**1a admission-fraction guard: implemented both ways, then DISABLED on
+evidence.** Pre-construction guard = the closed-form area-ratio skip at 0.9
+(already present; measured free). The post-admission fraction guard at 0.9
+cost EXACTLY one search granule (1.2e-4) on five ieee9 single-frame radii
+— isolated by toggling each guard alone. Mechanism: with the tilt fixed,
+min/max over ALL cells equals the box bound (that is R-1's equality), so
+Tier 1's entire recovery lives in the EXCLUDED cells — the box-corner
+cells where the residual extrema sit; even 5% exclusion can carry most of
+the gain, so admission fraction is a bad proxy for "nothing to recover".
+Final configuration: area-ratio guard 0.9 (free), admission guard off.
+The premise "above 0.9 admission there is provably nothing to recover" is
+false and the correctness check caught it.
+
+**1b round cutover: implemented (`zono_last_rounds` on certify_radius_*),
+swept, and the curve says DO NOT USE IT where Tier 1 matters.** The
+Algorithm-1 walk is a trajectory, not a window: one early box rejection
+steers the walk to grid points from which the later zono rounds can climb
+back at most ~2^-(13-k). Measured (radius vs full-zono, 24 workers):
+
+| combo | k=13 | k=6 | k=4 | k=3 | k=1 | k=0 |
+|---|---|---|---|---|---|---|
+| ieee9 multi (granules lost / s) | 0 / 19.3 | 0 / 11.6 | 0 / 8.6 | 2 / 7.0 | 2 / 4.0 | 3 / 2.5 |
+| ieee9 single | 0 / 25.8 | **36** / 16.2 | 52 / 13.4 | 52 / 11.5 | 58 / 8.3 | 58 / 6.6 |
+| synth multi | 0 / 92.2 | 0 / 46.1 | 0 / 31.6 | 0 / 24.5 | 0 / 10.4 | 0 / 3.4 |
+| synth single | 0 / 415.8 | 0 / 196.7 | ... | ... | 17 / 44.7 | 17 / 9.3 |
+
+The "last 3-4 rounds suffice" expectation is FALSE on ieee9 single-frame
+(36+ granules lost at any cutover; all 30 frames drop). Cutover is free
+exactly where Tier 1 buys nothing (synth: k=1 free at 8.9x — but there
+you would simply not run Tier 1). ieee9 multi tolerates k=4 (2.2x, 0
+granules). Recorded as available-but-default-off (None).
+
+**Item 2 direction merge: helps, and the diagnosis was HALF right.**
+`geometry.merge_generators_2d` (outward slack, containment-tested on
+unclamped support values) + in the Tier-1 SAT test a stronger variant:
+directions deduplicated within 1e-3 rad but supports summed over ALL
+original generators — dropping a separating direction only admits more
+cells (sound), and no slack is needed at all. Measured: direction count
+collapses only ~2-3x (not the hoped ~100x — the correlated operands sit
+degrees apart, not milliradians); isolated effect on the synth multi-frame
+zono reach: 19.4 -> 7.0 s (2.8x) at eps 0.02, 7.1 -> 3.7 s (1.9x) at 0.35.
+So the merge moves the multi-frame numbers ~2-3x; the REMAINING ~15-20x
+over the box path is per-cell certified enumeration over ~350k admitted
+cells per reach, not the SAT test. e2e radii under the final configuration
+are EXACTLY the pre-guard Tier-1 values (all 12 rows). Target met: the
+synth multi-frame k-ary zono configuration that previously ran >1 h
+completes in **99 s** with the identical radius.
+
+**Item 3.** The scalar sigma*tanh R-1 nightly is retired (batch-only
+nightly; the scalar transcription remains in the fast tier and as the
+runtime differential canary). Its replacement:
+`tests/soundness/reference_hp.py` + `test_hp_reference.py` — a 50-digit
+mpmath implementation of the candidate mathematics written directly from
+the stationarity equations, importing nothing from cert_rnn: soundness
+direction (C1 <= true_min, C2 >= true_max) is a hard zero-tolerance check
+(fast tier: 482 boxes, worst unsoundness 0.0 on both bilinears); the
+tightness direction is budgeted per box by the PREDICTED certified
+enclosure width — observed loose boxes sit at exactly 0.5x the predicted
+width (true value mid-interval), so slack explained by the intervals
+passes and unexplained slack fails at any magnitude. The same
+prediction-relative idea restores R-1's sensitivity: each child-slack is
+divided by the predicted enclosure width on its box; distribution measured
+max 0.25, p95 0.22, median 0.004 (all slack well inside prediction), with
+a hard alert at ratio > 30.
+
 ## Open items (next steps per plan)
 
 - Vertex enumeration promotion + property tests (step 3).

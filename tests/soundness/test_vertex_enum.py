@@ -113,3 +113,28 @@ def test_segment_polygon_rejects_points_beyond_endpoints():
     ])
     got = points_in_convex_polygon(pts, verts, tol=1e-9)
     assert got.tolist() == [True, True, False, False, False]
+
+
+@pytest.mark.soundness
+def test_merge_generators_outward_containment():
+    """merge_generators_2d must return a zonotope CONTAINING the original
+    (support function >= original in every direction, unclamped check) and
+    collapse near-parallel direction counts."""
+    from cert_rnn.geometry import merge_generators_2d
+    rng = np.random.default_rng(SEED)
+    for p, spread in ((50, 0.0005), (200, 0.02), (1000, 0.5), (30, np.pi)):
+        base = rng.uniform(0, np.pi)
+        ang = base + rng.uniform(-spread, spread, p)
+        mag = rng.lognormal(0, 1.5, p)
+        G = np.stack([mag * np.cos(ang), mag * np.sin(ang)], axis=1)
+        Gm, n_dirs = merge_generators_2d(G, angle_tol=1e-3)
+        assert Gm.shape[0] <= p + 2
+        dirs = rng.normal(0, 1, (256, 2))
+        dirs /= np.linalg.norm(dirs, axis=1, keepdims=True)
+        sup_o = np.abs(dirs @ G.T).sum(axis=1)
+        sup_m = np.abs(dirs @ Gm.T).sum(axis=1)
+        worst = float(np.max(sup_o - sup_m))          # >0 would mean NOT containing
+        assert worst <= 1e-9 * max(1.0, float(sup_o.max())), \
+            f"merged zonotope fails containment by {worst:.3e} (p={p}, spread={spread})"
+        if spread <= 0.02:
+            assert n_dirs <= 45, (p, spread, n_dirs)

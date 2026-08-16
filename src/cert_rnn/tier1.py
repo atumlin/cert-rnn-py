@@ -38,11 +38,31 @@ import numpy as np
 GRID_N = 16
 # Outward slack on the SAT test, relative to the cell/zonotope scale.
 SAT_TOL = 1e-12
-# Skip coordinates whose joint zonotope already fills this fraction of its
-# bounding box (closed-form area ratio): the box is nearly exact there and
-# the grid cover would recover little. Falling back to the box result is
-# sound; this only trades tightness for time.
+# Guard 1 (pre-construction): skip coordinates whose joint zonotope already
+# fills this fraction of its bounding box (closed-form area ratio, O(p log p),
+# computed BEFORE any cell is built): the box is nearly exact there and the
+# grid cover would recover little. Falling back to the box result is sound;
+# this only trades tightness for time.
 HEADROOM_SKIP = 0.9
+# Guard 2 (post-admission fraction) is DISABLED (1.0): measured on ieee9-S
+# it cost exactly one search granule (1.2e-4) of certified radius at 0.9.
+# Mechanism: with the tilt fixed, the min/max over ALL cells equals the box
+# bound (R-1 equality), so Tier 1's entire recovery comes from the EXCLUDED
+# cells — which are exactly the box-corner cells where the residual extrema
+# sit. Admission fraction is therefore a poor proxy for "nothing to
+# recover"; even 5% exclusion can carry most of the gain. The area-ratio
+# guard above covers the provably-nothing case at zero tightness cost.
+ADMIT_SKIP = 1.0
+# SAT separating directions are deduplicated by angle within this tolerance.
+# Dropping a near-duplicate direction can only ADMIT more cells (sound); the
+# support sums along the kept directions run over ALL original generators,
+# so no outward slack is involved. Collapses ~1000 projected generators to
+# a few dozen distinct directions in the multi-frame regime.
+DIR_TOL = 1e-3
+# Optional instrumentation: when a dict is assigned here, admitted_cells
+# accumulates {"dirs_raw": .., "dirs_kept": .., "cells_admitted": ..,
+# "cells_total": .., "skip_area": .., "skip_admit": .., "coords": ..}.
+STATS = None
 
 
 def _area_ratio(gx, gy, wx, wy):
@@ -76,16 +96,26 @@ def admitted_cells(cx, cy, gx, gy, lx, ux, ly, uy, n=GRID_N):
     # i.e. the perpendiculars of its generators (deduplicated by angle).
     perp = np.stack([-G[:, 1], G[:, 0]], axis=1)
     perp /= np.linalg.norm(perp, axis=1, keepdims=True)
-    # canonicalize to angle in [0, pi) and drop near-duplicates (a
-    # duplicate direction only repeats a constraint; dropping it is exact)
+    # canonicalize to angle in [0, pi) and drop near-duplicates within
+    # DIR_TOL. Dropping a separating direction can only admit MORE cells
+    # (sound); the supports along kept directions still sum over ALL
+    # original generators (exact), so no outward rounding is needed here.
     flip = (perp[:, 1] < 0) | ((perp[:, 1] == 0) & (perp[:, 0] < 0))
     perp = np.where(flip[:, None], -perp, perp)
     ang = np.arctan2(perp[:, 1], perp[:, 0])
     order = np.argsort(ang)
     perp = perp[order]; ang = ang[order]
     keep = np.ones(perp.shape[0], dtype=bool)
-    keep[1:] = np.diff(ang) > 1e-12
+    last = ang[0]
+    for i in range(1, ang.shape[0]):
+        if ang[i] - last > DIR_TOL:
+            last = ang[i]
+        else:
+            keep[i] = False
     D = perp[keep]                                   # (m, 2)
+    if STATS is not None:
+        STATS["dirs_raw"] = STATS.get("dirs_raw", 0) + int(perp.shape[0])
+        STATS["dirs_kept"] = STATS.get("dirs_kept", 0) + int(D.shape[0])
     # Z's extent along each direction: center projection +- support
     zc = D @ np.array([cx, cy])                       # (m,)
     zr = np.abs(D @ G.T).sum(axis=1)                  # (m,)
@@ -105,9 +135,18 @@ def admitted_cells(cx, cy, gx, gy, lx, ux, ly, uy, n=GRID_N):
           (proj - crad[None, :] > zc[None, :] + zr[None, :] + tol)
     admitted = ~sep.any(axis=1)                       # (n^2,)
     idx = np.flatnonzero(admitted)
+    if STATS is not None:
+        STATS["cells_admitted"] = STATS.get("cells_admitted", 0) + int(idx.size)
+        STATS["cells_total"] = STATS.get("cells_total", 0) + int(n * n)
     if idx.size == 0:
         # cannot happen for a valid Z (its center is in the box), but be
         # safe: fall back to the whole box
+        return None
+    if idx.size >= ADMIT_SKIP * n * n:
+        # Guard 2: Z nearly fills the box; per-cell enumeration on ~n^2
+        # cells would recover almost nothing. Box fallback (sound).
+        if STATS is not None:
+            STATS["skip_admit"] = STATS.get("skip_admit", 0) + 1
         return None
     ix = idx // n; iy = idx % n
     return xe[ix], xe[ix + 1], ye[iy], ye[iy + 1]
@@ -131,9 +170,13 @@ def c1c2_over_zono(kind, A, B, cx, cy, Vx, Vy, lx, ux, ly, uy,
     owners = []
     wx = ux - lx; wy = uy - ly
     for k in range(K):
+        if STATS is not None:
+            STATS["coords"] = STATS.get("coords", 0) + 1
         if C2_box[k] - C1_box[k] <= 0.0 or not (wx[k] > 0 and wy[k] > 0):
             continue
         if _area_ratio(Vx[k], Vy[k], wx[k], wy[k]) > HEADROOM_SKIP:
+            if STATS is not None:
+                STATS["skip_area"] = STATS.get("skip_area", 0) + 1
             continue
         cells = admitted_cells(cx[k], cy[k], Vx[k], Vy[k],
                                lx[k], ux[k], ly[k], uy[k], n)
