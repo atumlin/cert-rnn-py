@@ -463,6 +463,73 @@ every completed configuration.**
   the differential canary. Tier 1 multipliers against the NEW box
   baseline: 4–10× (ieee9), 11–45× (synth-H16); Item 2 will re-baseline.
 
+## K. Phase 1 throughput (2a parallel T loop, 2b k-ary search)
+
+Implementation: `verify.py` — `kary_epsilon`, `_search_frames` (process
+pool with a per-worker model payload), and `search=`, `probes=`,
+`n_workers=` parameters on `certify_radius_spec_a/_c` (defaults unchanged:
+sequential Algorithm 1). Both changes are pure reorderings of identical
+arithmetic.
+
+**Grid arithmetic (2b).** `bisect_epsilon(eps_init=0.5, n_iters=12)` is
+bisection on (0, 1) with 12 loop probes + 1 final = **13 probes at
+resolution 2^-13**; for a monotone oracle it returns the largest certified
+point of the grid G = {j * 2^-13}. A k-ary round with m = 2^a - 1 probes
+narrows by a bits, so ending on exactly this grid needs rounds of bits
+summing to 13: **15 probes => 4+4+4+1 => 4 sequential rounds, 46 probes**
+(three rounds would stop at 2^-12 and could return a smaller radius; a
+finer grid could return a larger one). 31 probes => 5+5+3 => 3 rounds (61
+probes); 63 => 6+6+1 => 3 rounds; 127 => 7+6 => 2 rounds. probes=1
+degenerates to the 13-round bisection (used as a self-check). Requires
+eps_init >= 0.5 (where Algorithm 1's `max(eps, 0)` clamp never fires).
+
+**Allocator determinism (2a).** Each worker process has its own default
+predicate allocator, so ids differ from the sequential run by an offset.
+This does not perturb results: within a reach ids are allocated
+monotonically, every zonotope orders its columns by allocation order (ids
+sorted), and `align_pred_space` / `_stack_residuals` depend only on that
+relative order. Verified directly (`test_allocator_offset_invariance`:
+reach from allocator start 0 vs 10^6 => identical (c, V), identical
+relative id ranks, identical score bound). No finding.
+
+**Bit-identity (the regression test that matters).**
+`tests/soundness/test_throughput_identity.py`: (i) k-ary == bisection on
+300 random monotone oracles x probe counts {1,3,7,15,31,127}; (ii) random
+AE, T=6, both settings: sequential Algorithm 1 vs parallel bisection vs
+k-ary sequential vs k-ary parallel — exact equality of the radius and every
+per-frame radius; (iii) nightly: **ieee9-S and synth-H16, both settings,
+all 30 frames, 12-round resolution — exact equality across all
+configurations. PASSED.**
+
+**Wall-clock (24 workers on 28 cores; radii identical in every row):**
+
+| subject / setting | A baseline (seq. bisection, 13 rounds) | B 2a only (parallel frames, 13 rounds) | C 2b seq-probes (4 rounds, 46 probes/frame, no parallelism) | E 2a+2b (k-ary 15, 4 rounds) | best |
+|---|---|---|---|---|---|
+| ieee9-S multi | 2.5 s | — (1 frame) | 8.8 s | **1.3 s** | 1.9x (E) |
+| ieee9-S single | 57.9 s | **5.9 s** | 205 s | 21.0 s | **9.9x (B)** |
+| synth-H16 multi | 3.1 s | — | 11.1 s | **1.8 s** | 1.7x (E) |
+| synth-H16 single | 73.8 s | **7.5 s** | (skipped; ≈3.5× A by construction) | 26.6 s (7 probes: 16.2 s; 31: 42.0 s) | **9.9× (B)** |
+
+Probe sweep for E on ieee9 single-frame: 7 -> 13.7 s (5 rounds), 15 ->
+21.0 s (4), 31 -> 32.9 s (3), 63 -> 61.9 s (3).
+
+**Reading — k-ary is a depth optimisation, not a work optimisation.** It
+cuts sequential rounds 13 -> 4 but multiplies total probes 13 -> 46
+(3.5x). When the frames already saturate the pool (30 frames on 24
+cores), the extra probes just queue and E is *slower* than B; k-ary pays
+only when workers >> frames — the multi-frame setting (one frame;
+1.7–1.9x) or a much larger machine. The proposal's "15 parallel probes per
+round" is free only if that parallelism is otherwise idle. Recommendation:
+2a always; k-ary for multi-frame or when n_workers >= ~15 x frames; keep
+`probes` tunable per hardware. The ~2x ceiling on multi-frame is the round
+latency (one reach) plus pool overhead against a 2–3 s baseline; on longer
+reaches the 13 -> 4 depth ratio shows through more.
+
+**Tier 1 against the new baseline.** ieee9-S single-frame: box A 57.9 s /
+zono A 274.7 s = 4.7x; the multiplier is a per-reach property that
+parallelism leaves unchanged. Multi-frame ieee9: 11.4x (28.0 / 2.5 s).
+Synth-H16 multi-frame: 65× (203 / 3.1 s) — at the large probe eps of the search the joint sets are fat, most of the 16×16 cells are admitted and the certified enumeration runs on ~4 000 cells per bilinear call; the k-ary Tier-1 row for this setting did not finish in >1 h and was stopped. Synth single-frame Tier 1: from the per-frame e2e data, 11–87× per frame (median ~30×). These multipliers are per-reach properties and are unchanged by 2a/2b; they are the cost story that generator merging / selective application / adaptive refinement (deferred by instruction) must address — and note Tier 1 buys nothing on synth (§I) so selective application would switch it off there entirely.
+
 ## Open items (next steps per plan)
 
 - Vertex enumeration promotion + property tests (step 3).
