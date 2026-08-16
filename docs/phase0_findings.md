@@ -597,6 +597,50 @@ divided by the predicted enclosure width on its box; distribution measured
 max 0.25, p95 0.22, median 0.004 (all slack well inside prediction), with
 a hard alert at ratio > 30.
 
+## M. Item 4 — Tier 2 headroom, measured directly post-Tier-1: **NO-GO**
+
+`research/phase2_tier2_headroom.py` (eps=0.02, seed 20260817, Tier-1
+pipeline, 400 sampled cells): per cell, TRUE ranges of P1 = sigma(f) c_prev
+and P2 = sigma(i) tanh(g) separately and of P1 + P2 jointly, over the joint
+4-D set (dense eps-space sampling incl. sign corners + projected-gradient
+ascent on each of the six extrema — converges from below on both sides of
+the comparison, so the DIFFERENCE of ranges is robust). W_sep - W_joint is
+the structural ceiling for ANY joint (Tier 2) method over any per-product
+method, before Tier 2's own relaxation losses (Chebyshev remainders, LP
+lifting gap).
+
+| combo | Tier-2 ceiling / W_sep | / pipeline width | residual per-product slack |
+|---|---|---|---|
+| ieee9-S multi_frame | 4.6% | 3.6% | 22.1% |
+| ieee9-S single_frame | **0.5%** | **0.3%** | 35.7% |
+| synth-H16 multi_frame | 6.3% | 3.9% | 38.8% |
+| synth-H16 single_frame | **0.0%** | **0.0%** | 0.8% |
+
+**Why the correlation ceiling evaporated.** The Z4 couplings post-Tier-1
+are still extreme in single-frame (all six pairs |cos| 0.91-0.99) — but
+near-PERFECT correlation is exactly the regime where joint bounding gains
+nothing: the operands are close to rank-1 in eps-space, both products
+become functions of nearly the same scalar, and their minimizers COINCIDE
+— min(P1+P2) = min P1 + min P2 with equality (the proposal's own §5.1
+caveat, "equality only when the minimizers coincide", is the actual
+operating regime, not the exception). Tier 2's premise needs PARTIAL
+correlation; that exists only in multi-frame, where the ceiling is 4-6% of
+already-small cell widths.
+
+**Where the width actually is:** residual per-product slack (pipeline
+width minus the sum of true product ranges) is 22-39% on three of four
+combos — recoverable by better PER-PRODUCT bounding (finer Tier-1 grids,
+or the single-plane restriction / loss source C, proposal §2.4), not by
+any joint machinery.
+
+**Judgement: do not build Tier 2** (RLT, polynomialization, per-cell LP)
+for these workloads: its structural ceiling is <= 0.5% of cell width where
+the headline numbers live and <= 6.3% anywhere, before subtracting its own
+relaxation losses and paying an LP per cell per step. Redirect tightness
+effort at the measured 22-39% per-product residual. Revisit only if a
+future benchmark shows Z4 coupling in the 0.3-0.8 band (partial
+correlation) with material cell widths.
+
 ## Open items (next steps per plan)
 
 - Vertex enumeration promotion + property tests (step 3).
