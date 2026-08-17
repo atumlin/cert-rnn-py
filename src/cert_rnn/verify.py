@@ -393,6 +393,8 @@ def _init_worker(payload: dict) -> None:
     _WORKER_PAYLOAD.clear()
     _WORKER_PAYLOAD.update(payload)
     set_bilinear_mode(payload.get("bilinear_mode", "box"))
+    from cert_rnn.transformers import set_tilt_mode
+    set_tilt_mode(payload.get("tilt_mode", "cornerfit"))
 
 
 def _worker_probe(job):
@@ -442,10 +444,10 @@ def _search_frames(
     radius and <= the all-zono radius. None = current mode everywhere.
 
     Returns (per-frame radii, sequential rounds)."""
-    from cert_rnn.transformers import get_bilinear_mode
+    from cert_rnn.transformers import get_bilinear_mode, get_tilt_mode
 
     session_mode = get_bilinear_mode()
-    payload = dict(payload, bilinear_mode=session_mode)
+    payload = dict(payload, bilinear_mode=session_mode, tilt_mode=get_tilt_mode())
     if search not in ("bisect", "kary"):
         raise ValueError(f"unknown search {search!r}")
 

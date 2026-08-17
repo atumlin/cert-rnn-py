@@ -153,7 +153,7 @@ def admitted_cells(cx, cy, gx, gy, lx, ux, ly, uy, n=GRID_N):
 
 
 def c1c2_over_zono(kind, A, B, cx, cy, Vx, Vy, lx, ux, ly, uy,
-                   C1_box, C2_box, n=GRID_N):
+                   C1_box, C2_box, n=None):
     """Tier 1 (C1, C2) for K coordinates.
 
     kind: "sigtanh" | "sigid". A, B, cx, cy, lx, ux, ly, uy, C1_box,
@@ -163,6 +163,8 @@ def c1c2_over_zono(kind, A, B, cx, cy, Vx, Vy, lx, ux, ly, uy,
     """
     from cert_rnn.transformers import _c1c2_sigid_batch, _c1c2_sigtanh_batch
 
+    if n is None:
+        n = GRID_N   # read at CALL time so the module setting is honoured
     K = A.shape[0]
     C1 = C1_box.copy()
     C2 = C2_box.copy()

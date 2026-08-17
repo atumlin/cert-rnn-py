@@ -39,6 +39,40 @@ def _sigmoid(x):
 
 _BILINEAR_MODE = "box"   # "box": Cert-RNN baseline; "zono": Tier 1
 
+# ---------- sigma*tanh tilt selection ----------
+# "cornerfit": Table 8 Case-1 tilt applied universally (the shipped default,
+#              also the MATLAB reference's choice);
+# "table8":    faithful per-case Table 8 tilts (cert_rnn.table8), keeping
+#              the tightest listed sub-solution where several are listed;
+# "best":      tightest of table8 and cornerfit per element.
+# All three use the exact certified offsets, so all are sound; they differ
+# only in tilt. TABLE8_CASE_COUNTS accumulates per-case coverage when set
+# to a dict.
+_TILT_MODE = "cornerfit"
+TABLE8_CASE_COUNTS = None
+
+
+def set_tilt_mode(mode: str) -> None:
+    global _TILT_MODE
+    if mode not in ("cornerfit", "table8", "best"):
+        raise ValueError(mode)
+    _TILT_MODE = mode
+
+
+def get_tilt_mode() -> str:
+    return _TILT_MODE
+
+
+class tilt_mode:
+    def __init__(self, mode):
+        self.mode = mode
+
+    def __enter__(self):
+        self.prev = get_tilt_mode(); set_tilt_mode(self.mode); return self
+
+    def __exit__(self, *exc):
+        set_tilt_mode(self.prev); return False
+
 
 def set_bilinear_mode(mode: str) -> None:
     """Select the bilinear residual-offset method globally.
@@ -268,6 +302,42 @@ def _c1c2_sigtanh_batch(A: np.ndarray, B: np.ndarray,
     return C1, C2
 
 
+def _apply_table8_tilts(A, B, C1, C2, lx, ux, ly, uy, nondeg):
+    """Replace the corner-fit plane by the Table 8 per-case tilt (mode
+    "table8": tightest listed sub-solution; mode "best": tightest of those
+    and corner-fit). Offsets are always the exact certified extrema for the
+    chosen tilt, so every option is sound. Non-degenerate elements only."""
+    from cert_rnn.table8 import table8_tilts
+
+    A = A.copy(); B = B.copy(); C1 = C1.copy(); C2 = C2.copy()
+    idx = np.flatnonzero(nondeg)
+    if idx.size == 0:
+        return A, B, C1, C2
+    cand_A = []; cand_B = []; owner = []; tags = []; cases = []
+    for k in idx:
+        case, tilts = table8_tilts(float(lx[k]), float(ux[k]), float(ly[k]), float(uy[k]))
+        cases.append(case)
+        for tag, a, b in tilts:
+            cand_A.append(a); cand_B.append(b); owner.append(k); tags.append(tag)
+    if TABLE8_CASE_COUNTS is not None:
+        for c in cases:
+            TABLE8_CASE_COUNTS[c] = TABLE8_CASE_COUNTS.get(c, 0) + 1
+    cand_A = np.asarray(cand_A); cand_B = np.asarray(cand_B); owner = np.asarray(owner)
+    c1, c2 = _c1c2_sigtanh_batch(cand_A, cand_B, lx[owner], ux[owner], ly[owner], uy[owner])
+    gap = c2 - c1
+    for k in idx:
+        m = owner == k
+        j = np.flatnonzero(m)[np.argmin(gap[m])]
+        best_gap = gap[j]
+        if _TILT_MODE == "table8" or best_gap < (C2[k] - C1[k]):
+            A[k] = cand_A[j]; B[k] = cand_B[j]; C1[k] = c1[j]; C2[k] = c2[j]
+            if TABLE8_CASE_COUNTS is not None:
+                TABLE8_CASE_COUNTS["win:" + tags[j]] = TABLE8_CASE_COUNTS.get("win:" + tags[j], 0) + 1
+        elif TABLE8_CASE_COUNTS is not None:
+            TABLE8_CASE_COUNTS["win:cornerfit"] = TABLE8_CASE_COUNTS.get("win:cornerfit", 0) + 1
+    return A, B, C1, C2
+
+
 def _sigtanh_plane_batch(lx: np.ndarray, ux: np.ndarray,
                          ly: np.ndarray, uy: np.ndarray):
     """Batched per-element plane (A, B, C1, C2) for f(x, y) = sigma(x) tanh(y).
@@ -287,6 +357,10 @@ def _sigtanh_plane_batch(lx: np.ndarray, ux: np.ndarray,
     A = (su - sl) * (tly + tuy) / (2 * wx_safe)
     B = (sl + su) * (tuy - tly) / (2 * wy_safe)
     C1, C2 = _c1c2_sigtanh_batch(A, B, lx, ux, ly, uy)
+
+    if _TILT_MODE != "cornerfit":
+        A, B, C1, C2 = _apply_table8_tilts(A, B, C1, C2, lx, ux, ly, uy,
+                                           ~(x_point | y_point))
 
     # Degenerate y (y is a point): f = ty * sigma(x); 1D plane in x.
     only_y = y_point & ~x_point
