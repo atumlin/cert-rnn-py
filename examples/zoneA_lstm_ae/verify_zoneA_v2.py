@@ -44,8 +44,17 @@ import socket
 import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
+
+# cert_rnn need not be installed in this interpreter: this script lives in
+# <repo>/examples/zoneA_lstm_ae/, so <repo>/src is two levels up.
+try:
+    import cert_rnn  # noqa: F401
+except ModuleNotFoundError:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+    import cert_rnn  # noqa: F401
 
 
 def log(msg: str) -> None:
