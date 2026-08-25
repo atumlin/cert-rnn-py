@@ -9,8 +9,15 @@ threshold evaluation → certification with cert-rnn.
   to the overnight-script path.
 - `lstm_ae_model_example_v2.ipynb` — v2: same model path, refined
   verification strategy (Cert-RNN+): ZRLT Tier 1 (`bilinear_mode("zono")`)
-  vs the box baseline side by side, the joint quadratic score bound,
-  parallel/k-ary epsilon search, robustness curve, and per-frame radii.
+  vs the box baseline, the joint quadratic score bound, parallel/k-ary
+  epsilon search, robustness curve, and per-frame radii. The heavy
+  stages run OUTSIDE the notebook: the notebook saves a job file, the
+  driver runs it detached, the notebook loads the JSON and draws figures.
+- `verify_zoneA_v2.py` — the detached driver (run it inside tmux so an
+  SSH drop costs nothing). Five stages, each checkpointed to the results
+  JSON as it finishes; rerunning skips completed stages. See its
+  docstring for the tmux commands and the `--stages` /
+  `--zono-last-rounds` knobs.
 
 Data (`SubFeatures_*_zoneA.csv`, `CyPhyScenarioLabels_*.csv`) is NOT in
 this repo; run the notebooks where it lives. Outputs are stripped in the
