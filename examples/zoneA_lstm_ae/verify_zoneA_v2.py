@@ -17,16 +17,21 @@ torch nor the notebook's model classes.
 Stages (each checkpointed to --out as soon as it finishes; rerunning
 skips completed stages, so the script is resume-safe):
 
-  box_multi          baseline Cert-RNN radius, multi_frame
+  box_multi          baseline Cert-RNN radius, multi_frame (previous strategy)
   zono_multi         Cert-RNN+ ZRLT Tier 1 radius, multi_frame
   zono_joint_multi   Tier 1 + joint quadratic score bound, multi_frame
   curves             sound score-vs-eps curves under both gate modes
   zono_single_frame  Tier 1 per-frame radii (parallel k-ary search)
 
---zono-last-rounds N evaluates all but the last N search rounds in cheap
-box mode (sound cutover; result lands between all-box and all-zono).
-It applies to the zono_single_frame stage; the multi_frame stages run
-through the spec-level certify, whose per-probe progress lines are the
+The refined stages run with the SPEED-UPS ON BY DEFAULT: the search
+probes in cheap box mode for the early rounds and switches to Tier-1
+zono only for the last --zono-last-rounds rounds (default 3), where the
+radius is actually decided. Both gate modes are sound, so every mixed
+schedule certifies only true radii; the result lands between the
+all-box and the all-zono radius (and is never below all-box). Pass
+--zono-last-rounds -1 for pure Tier-1 everywhere (slow but tightest);
+the single-frame stage additionally uses the parallel k-ary probe walk
+(--workers). The multi_frame stages print one line per probe -- the
 tmux heartbeat.
 """
 
@@ -83,9 +88,10 @@ def main() -> int:
                     default=max(1, (os.cpu_count() or 2) - 2))
     ap.add_argument("--eps-init", type=float, default=0.5)
     ap.add_argument("--n-iters", type=int, default=12)
-    ap.add_argument("--zono-last-rounds", type=int, default=None,
-                    help="Tier-1 cutover: only the last N rounds run in "
-                         "zono mode (sound; cheaper; see module docstring)")
+    ap.add_argument("--zono-last-rounds", type=int, default=3,
+                    help="Tier-1 cutover: only the last N search rounds run "
+                         "in zono mode (sound; the speed-up). -1 = pure "
+                         "Tier-1 in every round (slow but tightest)")
     ap.add_argument("--stages", default="all",
                     help="comma list from: box_multi,zono_multi,"
                          "zono_joint_multi,curves,zono_single_frame")
@@ -145,6 +151,35 @@ def main() -> int:
                           eps_init=args.eps_init, n_iters=args.n_iters,
                           progress=log)
 
+    zono_last = args.zono_last_rounds
+    if zono_last is not None and zono_last < 0:
+        zono_last = None                      # pure Tier-1 everywhere
+
+    def certify_multi_cutover(spec) -> float:
+        """Algorithm-1 bisection (multi_frame) with the sound box->zono
+        cutover: rounds before the last `zono_last` probe in cheap box
+        mode, the final rounds in Tier-1 zono. Sound for any schedule
+        (both modes are certified bounds); result >= the all-box radius
+        and <= the all-zono radius."""
+        eps, step, best = args.eps_init, args.eps_init, 0.0
+        total = args.n_iters + 1
+        for i in range(total):
+            mode = ("zono" if zono_last is None or i >= total - zono_last
+                    else "box")
+            t0 = time.perf_counter()
+            with bilinear_mode(mode):
+                ok = spec.holds(ae.reach(anchor, eps, "multi_frame", None))
+            log(f"probe {i + 1}/{total} [{mode}] eps={eps:.6g} -> "
+                f"{'holds' if ok else 'fails'} "
+                f"({time.perf_counter() - t0:.1f}s)")
+            if ok:
+                best = max(best, eps)
+                eps += step / 2
+            else:
+                eps -= step / 2
+            step /= 2
+        return best
+
     for name in wanted:
         if done(name):
             continue
@@ -156,14 +191,14 @@ def main() -> int:
             finish(name, {"radius": r.radius}, t0)
 
         elif name == "zono_multi":
-            with bilinear_mode("zono"):
-                r = certify_multi(ReconErrorSpec(tau))
-            finish(name, {"radius": r.radius}, t0)
+            radius = certify_multi_cutover(ReconErrorSpec(tau))
+            finish(name, {"radius": radius,
+                          "zono_last_rounds": zono_last}, t0)
 
         elif name == "zono_joint_multi":
-            with bilinear_mode("zono"):
-                r = certify_multi(JointReconErrorSpec(tau))
-            finish(name, {"radius": r.radius}, t0)
+            radius = certify_multi_cutover(JointReconErrorSpec(tau))
+            finish(name, {"radius": radius,
+                          "zono_last_rounds": zono_last}, t0)
 
         elif name == "curves":
             need = [s for s in ("box_multi", "zono_multi") if s not in S]
@@ -195,7 +230,7 @@ def main() -> int:
                     eps_init=args.eps_init, n_iters=args.n_iters,
                     threat_model="single_frame", n_workers=args.workers,
                     search="kary", probes=15,
-                    zono_last_rounds=args.zono_last_rounds)
+                    zono_last_rounds=zono_last)
             finish(name, {"radius": float(radius),
                           "per_frame": [float(x) for x in per_frame]}, t0)
 
