@@ -95,6 +95,13 @@ def main() -> int:
     ap.add_argument("--stages", default="all",
                     help="comma list from: box_multi,zono_multi,"
                          "zono_joint_multi,curves,zono_single_frame")
+    ap.add_argument("--single-search", choices=["bisect", "kary"],
+                    default="bisect",
+                    help="single-frame probe walk. bisect (default): "
+                         "13 probes/frame, frames run in parallel across "
+                         "--workers — best when workers <~ T. kary: 46 "
+                         "probes/frame in 4 rounds — only pays when the "
+                         "pool dwarfs the probe demand (workers >> T)")
     args = ap.parse_args()
 
     from cert_rnn import LSTMAutoencoder, ReconErrorSpec
@@ -229,7 +236,7 @@ def main() -> int:
                     ae.encoder, ae.decoder, ae.head, anchor, tau,
                     eps_init=args.eps_init, n_iters=args.n_iters,
                     threat_model="single_frame", n_workers=args.workers,
-                    search="kary", probes=15,
+                    search=args.single_search, probes=15,
                     zono_last_rounds=zono_last)
             finish(name, {"radius": float(radius),
                           "per_frame": [float(x) for x in per_frame]}, t0)
