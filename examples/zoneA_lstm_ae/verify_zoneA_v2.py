@@ -17,11 +17,19 @@ torch nor the notebook's model classes.
 Stages (each checkpointed to --out as soon as it finishes; rerunning
 skips completed stages, so the script is resume-safe):
 
-  box_multi          baseline Cert-RNN radius, multi_frame (previous strategy)
+Default stages (the single-frame head-to-head, Cert-RNN+ first; both
+run the SAME parallel per-frame walk and the SAME componentwise score
+bound, so the comparison isolates the gate refinement):
+
+  zono_single_frame  Cert-RNN+ ZRLT Tier 1 per-frame radii (cutover on)
+  box_single_frame   Cert-RNN baseline per-frame radii
+
+Extra stages via --stages (or --stages all):
+
+  box_multi          baseline Cert-RNN radius, multi_frame
   zono_multi         Cert-RNN+ ZRLT Tier 1 radius, multi_frame
   zono_joint_multi   Tier 1 + joint quadratic score bound, multi_frame
   curves             sound score-vs-eps curves under both gate modes
-  zono_single_frame  Tier 1 per-frame radii (parallel k-ary search)
 
 The refined stages run with the SPEED-UPS ON BY DEFAULT: the search
 probes in cheap box mode for the early rounds and switches to Tier-1
@@ -92,9 +100,12 @@ def main() -> int:
                     help="Tier-1 cutover: only the last N search rounds run "
                          "in zono mode (sound; the speed-up). -1 = pure "
                          "Tier-1 in every round (slow but tightest)")
-    ap.add_argument("--stages", default="all",
-                    help="comma list from: box_multi,zono_multi,"
-                         "zono_joint_multi,curves,zono_single_frame")
+    ap.add_argument("--stages", default="default",
+                    help="'default' = zono_single_frame,box_single_frame "
+                         "(the single-frame head-to-head); 'all' adds the "
+                         "multi_frame stages and curves; or a comma list "
+                         "from: zono_single_frame,box_single_frame,"
+                         "box_multi,zono_multi,zono_joint_multi,curves")
     ap.add_argument("--single-search", choices=["bisect", "kary"],
                     default="bisect",
                     help="single-frame probe walk. bisect (default): "
@@ -124,8 +135,10 @@ def main() -> int:
         "updated": time.strftime("%Y-%m-%d %H:%M:%S"),
     })
     S = res["stages"]
-    wanted = (["box_multi", "zono_multi", "zono_joint_multi", "curves",
-               "zono_single_frame"] if args.stages == "all"
+    DEFAULT = ["zono_single_frame", "box_single_frame"]
+    ALL = DEFAULT + ["box_multi", "zono_multi", "zono_joint_multi", "curves"]
+    wanted = (DEFAULT if args.stages == "default"
+              else ALL if args.stages == "all"
               else [s.strip() for s in args.stages.split(",")])
 
     def done(name: str) -> bool:
@@ -228,18 +241,22 @@ def main() -> int:
                 "score_ub_zono": [float(s) for _, s in curve_zono],
             }, t0)
 
-        elif name == "zono_single_frame":
-            # parallel per-frame walk + k-ary probes: this is where
-            # --workers actually pays (radii bit-identical to serial)
-            with bilinear_mode("zono"):
+        elif name in ("zono_single_frame", "box_single_frame"):
+            # parallel per-frame walk: this is where --workers pays
+            # (radii bit-identical to the serial Algorithm 1)
+            mode = "zono" if name.startswith("zono") else "box"
+            with bilinear_mode(mode):
                 radius, per_frame = certify_radius_spec_c(
                     ae.encoder, ae.decoder, ae.head, anchor, tau,
                     eps_init=args.eps_init, n_iters=args.n_iters,
                     threat_model="single_frame", n_workers=args.workers,
                     search=args.single_search, probes=15,
-                    zono_last_rounds=zono_last)
-            finish(name, {"radius": float(radius),
-                          "per_frame": [float(x) for x in per_frame]}, t0)
+                    zono_last_rounds=(zono_last if mode == "zono" else None))
+            payload = {"radius": float(radius),
+                       "per_frame": [float(x) for x in per_frame]}
+            if mode == "zono":
+                payload["zono_last_rounds"] = zono_last
+            finish(name, payload, t0)
 
         else:
             log(f"unknown stage {name!r}, skipping")
