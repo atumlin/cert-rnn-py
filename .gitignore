@@ -33,3 +33,17 @@ slides/
 /docs/lstm_ae_results.md
 /tests/test_lstm_ae_parity.py
 /tests/test_mnist_parity.py
+
+# Experiment outputs (JSONL results, figures, generated benchmarks, data)
+experiments/results/
+experiments/figures/
+experiments/benchmarks/generated/
+experiments/benchmarks/data/
+
+# Paper build artifacts
+paper/*.aux
+paper/*.log
+paper/*.out
+paper/*.bbl
+paper/*.blg
+paper/main.pdf

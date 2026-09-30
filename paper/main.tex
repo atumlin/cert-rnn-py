@@ -1,0 +1,632 @@
+\documentclass{article} % ICLR 2027 submission
+\usepackage{iclr2027_conference,times}
+
+\input{math_commands.tex}
+
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{graphicx}
+\usepackage{xcolor}
+
+% ---- draft machinery: remove before submission ----
+\newcommand{\todo}[1]{\textcolor{red}{[TODO: #1]}}
+\newcommand{\placeholder}[1]{\textcolor{blue}{#1}}
+% ---------------------------------------------------
+
+\newtheorem{proposition}{Proposition}
+\newtheorem{definition}{Definition}
+
+\newcommand{\score}{\mathrm{score}}
+\newcommand{\ub}{\mathrm{ub}}
+\newcommand{\lb}{\mathrm{lb}}
+
+\title{Certified Robustness of LSTM Autoencoders\\for Time-Series Anomaly Detection}
+
+% Anonymized for double-blind review.
+\author{Anonymous authors\\
+\texttt{anonymous}}
+
+\newcommand{\fix}{\marginpar{FIX}}
+\newcommand{\new}{\marginpar{NEW}}
+
+% \iclrfinalcopy  % uncomment for camera-ready (de-anonymizes)
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Reconstruction-based anomaly detectors---most commonly LSTM
+autoencoders---guard safety-critical infrastructure such as electric
+power grids, where both failure modes of the detector are attacks: an
+adversary may perturb sensor streams to \emph{raise} false alarms, or to
+\emph{mask} a genuine anomaly below the detection threshold. Despite a
+decade of neural-network verification, no existing deterministic
+verifier certifies the defining property of these detectors: a bound on
+a \emph{quadratic reconstruction-error score} of a \emph{recurrent
+autoencoder} over a perturbation set. We close this gap. We formalize
+detector-level certificates---certified false-alarm robustness
+($\score \le \tau$ over an $\ell_\infty$ ball around a normal window)
+and certified masking robustness ($\score \ge \tau$ around an anomalous
+window)---and compute them with sound zonotope abstract transformers for
+LSTMs, extending the Cert-RNN framework
+to encoder--decoder architectures and quadratic output specifications,
+with a predicate-alignment correction that we show is necessary for
+soundness on multi-layer models. On LSTM-AE detectors for the IEEE-9
+power system, our verifier is the only sound tool that completes the
+benchmark: interval bound propagation certifies nothing at the finest
+bisection granularity, and CROWN-style linear relaxation on the
+unrolled graph exceeds a one-hour-per-instance budget without
+finishing a single case. On a controlled scaling family the zonotope
+domain matches CROWN's certified radii to within 1--2\% while being
+$10^2$--$10^3\times$ faster per bound query, and still completes at
+hidden widths where CROWN times out. From per-window certificates we
+derive certified-robust false-positive/true-positive rates---certifying
+on our benchmark that no $\ell_\infty$ perturbation up to radius
+$0.0137$ can raise a false alarm on any tested normal window, and none
+up to $0.0176$ can mask any tested anomaly---to our knowledge the
+first deterministic end-to-end guarantee for a learned time-series
+anomaly detector. We release the verifier, an adapter harness that runs
+all baselines under an identical bisection protocol, and a deterministic
+LSTM-AE benchmark generator; no recurrent or anomaly-detection benchmark
+has appeared in VNN-COMP to date, and we propose ours to fill that gap.
+\end{abstract}
+
+\section{Introduction}
+\label{sec:intro}
+
+Learned anomaly detectors increasingly monitor cyber-physical systems:
+electric grids, water treatment, industrial control. The dominant
+recipe is reconstruction-based: train an autoencoder (typically an LSTM
+autoencoder for multivariate time series) on normal operation, and flag
+a window $x$ as anomalous when its reconstruction score
+$\score(x) = \tfrac{1}{N}\lVert \mathrm{AE}(x) - x\rVert_2^2$ exceeds a
+threshold $\tau$ calibrated on training data
+\citep{malhotra2016lstm,hundman2018detecting,su2019robust}.
+In adversarial settings this detector is itself an attack surface, in
+\emph{both} directions. An attacker who can inject small perturbations
+into sensor telemetry can (i) push normal windows above $\tau$,
+flooding operators with false alarms until the detector is ignored or
+disabled, or (ii) shave a genuine fault or attack signature below
+$\tau$, hiding it (\emph{anomaly masking}). Empirical attacks of both
+kinds are well documented, and recent work argues that reconstruction
+detectors are structurally brittle \citep{bouman2025unreliable}. For
+infrastructure operators the relevant question is not whether the
+detector performs well on average, but what can be \emph{guaranteed}
+about its output under bounded sensor perturbation.
+
+Answering that question is a verification problem with three
+compounding difficulties. First, the model is \emph{recurrent}:
+verification must propagate uncertainty through tens of LSTM steps with
+sigmoid/tanh gates and bilinear (gate$\times$state) interactions, where
+abstraction error compounds multiplicatively---the regime where
+ReLU-specialized feedforward verifiers offer no support. Second, the
+architecture is an \emph{autoencoder}: the property couples the
+network's output to its \emph{input} ($\mathrm{AE}(x)-x$), unlike the
+classification margins all existing RNN verifiers target
+\citep{ko2019popqorn,ryou2021scalable,jacoby2020rnnverify,du2021certrnn}.
+Third, the specification is \emph{quadratic}: certifying
+$\score \le \tau$ (or $\ge \tau$) requires sound bounds on a sum of
+squares, not a linear functional of the output. To our knowledge no
+published deterministic verifier handles this combination; the only
+certified defense for time-series anomaly detection to date is
+probabilistic, via randomized smoothing under DTW distance
+\citep{liu2026dtw}.
+
+\textbf{This paper.} We certify LSTM autoencoder anomaly detectors
+deterministically, end to end, and evaluate what such certification
+costs at scale.
+
+\textbf{Contributions.}
+\begin{itemize}
+\item \textbf{Detector-level certificates.} We formalize two dual
+  properties over an $\ell_\infty$ ball of radius $\epsilon$: certified
+  \emph{false-alarm} robustness ($\sup \score \le \tau$ around normal
+  windows) and certified \emph{masking} robustness
+  ($\inf \score \ge \tau$ around anomalous windows), together with
+  threat models perturbing one frame or all frames of a window.
+  Aggregated over windows these yield \emph{certified-robust FPR/TPR}
+  at radius $\epsilon$---the detector-level analogue of certified
+  accuracy (\S\ref{sec:method}).
+\item \textbf{A sound verifier for recurrent autoencoders.} We extend
+  zonotope abstract interpretation for LSTMs
+  \citep{du2021certrnn} to encoder--decoder architectures with
+  latent broadcast and per-step reconstruction heads, and to sound
+  upper \emph{and lower} bounds on the quadratic score. We identify a
+  predicate-aliasing unsoundness pattern that arises in multi-layer
+  recurrent abstractions under positional generator padding, prove a
+  Minkowski-correct alignment fixes it, and show it changes certified
+  radii on real checkpoints (\S\ref{sec:method}, \S\ref{sec:results}).
+  Our implementation is, to our knowledge, the only public one of the
+  Cert-RNN transformer family (the original code was never released).
+\item \textbf{A controlled comparison harness.} Certified-radius
+  comparisons across tools are confounded by differing search loops and
+  spec encodings. Our harness drives every sound tool---our verifier,
+  interval bound propagation, and auto\_LiRPA's IBP and CROWN modes on
+  the unrolled graph \citep{xu2020automatic}---through the
+  \emph{same} radius bisection with the \emph{same} quadratic-score
+  assembly from componentwise residual bounds, isolating the abstract
+  domain as the only variable; PGD falsification bounds every result
+  from above (\S\ref{sec:setup}).
+\item \textbf{Benchmarks.} Four trained IEEE-9 power-system LSTM-AE
+  checkpoints with a MATLAB star-set cross-reference; a
+  \emph{deterministic benchmark generator} producing trained detectors
+  at any (hidden width, window length, feature count, depth) from a
+  seed; and loaders for public server-telemetry data (SMD). VNN-COMP
+  2021--2025 contains no recurrent or anomaly-detection benchmark; we
+  propose ours (\S\ref{sec:setup}).
+\end{itemize}
+
+\textbf{Findings} (\S\ref{sec:results}). Certification of recurrent
+autoencoders exhibits a sharp Pareto structure. Interval propagation is
+fast but its bounds explode within a few LSTM steps: on the trained
+IEEE-9 detectors it certifies \emph{nothing} at the finest bisection
+granularity ($1.2\times10^{-4}$), and on the scaling family its
+certified radius collapses from competitive at $H{=}4$ to zero by
+$H{=}64$. CROWN-style backward relaxation is the tightest sound domain
+per query---but only marginally (within 1--2\% of our radii up to
+$H{=}32$; $22\%$ larger at $H{=}64$)---at $10^2$--$10^3\times$ the cost
+per bound query, timing out on every full IEEE-9 instance (one-hour
+budget) and on the scaling family at $H{=}128$ (15-minute budget). The
+zonotope verifier holds the practical middle: $0.04$--$10$\,s bound
+queries across the full lattice, empirical cost growth
+$\sim\!H^{1.6}$, $T^{1.7}$, $L^{1.7}$ and flat in $D$, and nonvacuous
+certificates on every benchmark instance. On the detector task
+(multi-frame threat model), all tested normal windows are certified
+false-alarm-robust at $\epsilon = 0.0137$ and all tested anomalous
+windows masking-robust at $\epsilon = 0.0176$, with median certified
+radii $0.023$ and $0.068$ respectively.
+
+\section{Related Work}
+\label{sec:related}
+
+\textbf{RNN verification.} POPQORN \citep{ko2019popqorn} bounds RNN,
+LSTM and GRU outputs with CROWN-style linear relaxations of the coupled
+gate nonlinearities; Prover \citep{ryou2021scalable} learns
+polyhedral relaxations optimized per network; RnnVerify
+\citep{jacoby2020rnnverify} infers invariants reducing vanilla ReLU-RNN
+verification to feedforward queries (LSTMs out of scope); Cert-RNN
+\citep{du2021certrnn} propagates zonotopes through sound bilinear and
+sigmoid/tanh transformers; star-set methods extend exact/overapproximate
+reachability to RNNs and LSTM audio classifiers
+\citep{tran2023star,pal2023lstmstar}; abstraction-refinement approaches
+followed \citep{lin2026refine}. All target
+classification-margin properties of recurrent \emph{classifiers}; none
+expresses a reconstruction-error property of an autoencoder, and none of
+the first four has maintained public code (POPQORN, Prover, RnnVerify
+repositories are unmaintained since 2020--21; Cert-RNN's code was never
+released). auto\_LiRPA \citep{xu2020automatic} generalizes linear
+relaxation to arbitrary computation graphs including unrolled LSTMs and
+is actively maintained within the $\alpha,\beta$-CROWN ecosystem
+\citep{wang2021beta,shi2024genbab}; it is our strongest runnable
+baseline, given the reconstruction residual as an explicit graph output.
+
+\textbf{Certified defenses for time series and anomaly detection.}
+Randomized smoothing yields probabilistic certificates and has recently
+been adapted to time-series anomaly detection under DTW perturbations
+\citep{liu2026dtw}. Our certificates are deterministic and exact with
+respect to the $\ell_\infty$ threat model: no sampling failure
+probability, and both directions (false alarm and masking) of the
+detector are covered. For \emph{feedforward} models,
+\citet{guidotti2024ae} verify autoencoder-based anomaly detection in a
+predictive-maintenance setting, \citet{bethune2023ocsdf} obtain exact
+certificates for 1-Lipschitz distance-based one-class classifiers
+(introducing certified-AUROC-style metrics), and IBP-certified OOD
+detectors bound classifier confidence \citep{bitterwolf2020good}. None
+addresses the recurrent case, and empirical concealment attacks on
+exactly our detector class are well documented
+\citep{erba2020concealment}. We therefore scope our claim precisely:
+the first \emph{deterministic} certification of a \emph{recurrent}
+(LSTM) autoencoder's reconstruction-error score, in both directions.
+
+\textbf{Anomaly detection in power systems.} LSTM autoencoders are a
+standard detector for PMU/bus telemetry
+\citep{malhotra2016lstm,hundman2018detecting}; public power-system
+attack datasets exist \citep{adhikari2018power}, and IEEE-bus
+simulation is the community-standard data source given CEII
+restrictions on utility data. Verification-oriented benchmarks are
+absent: no VNN-COMP edition (2021--2025) includes recurrent or
+anomaly-detection tasks.
+
+\section{Background}
+\label{sec:background}
+
+\textbf{LSTM autoencoder detectors.} An LSTM-AE consists of an encoder
+LSTM stack that consumes a window $x = (x_1,\dots,x_T)$,
+$x_t \in \mathbb{R}^D$, an (optional multi-layer) decoder LSTM stack
+that reads the encoder's final top-layer hidden state $z$ at every step,
+and a linear head mapping decoder states back to input space, producing
+$\hat{x} = \mathrm{AE}(x)$. The anomaly score is
+$\score(x) = \tfrac{1}{N}\lVert \mathrm{AE}(x)-x \rVert_2^2$ with
+$N = TD$; the detector flags $x$ iff $\score(x) > \tau$.
+
+\textbf{Zonotopes.} A zonotope
+$Z = \{ c + V\alpha : \alpha \in [-1,1]^p \} \subset \mathbb{R}^n$
+is closed under affine maps and Minkowski sums, and supports sound
+abstract transformers for the LSTM's sigmoid/tanh and bilinear
+operations \citep{du2021certrnn}: each transformer returns a zonotope
+containing the true image, introducing fresh generators to soundly
+overapproximate nonlinear residuals. Crucially, zonotopes are
+\emph{relational}: shared generators track first-order correlations
+between the perturbed input, the recurrent state, and (for
+autoencoders) the subtracted input---exactly what pure interval
+propagation discards.
+
+\textbf{Certified radius by bisection.} Given a sound predicate
+``property holds over the $\epsilon$-ball,'' Algorithm~1 of
+\citet{du2021certrnn} performs a $k$-step bisection on $\epsilon$
+returning the largest certified radius at granularity
+$\epsilon_0 2^{-k}$. All tools in our study answer the same predicate
+inside the same bisection (\S\ref{sec:setup}).
+
+\section{Certifying reconstruction-error properties}
+\label{sec:method}
+
+\subsection{Properties and threat models}
+
+\begin{definition}[False-alarm robustness]
+A detector $(\mathrm{AE},\tau)$ is $\epsilon$-certified
+\emph{false-alarm robust} at a normal window $x^\ast$ iff
+$\sup_{\lVert x' - x^\ast \rVert_\infty \le \epsilon} \score(x') \le \tau$.
+\end{definition}
+
+\begin{definition}[Masking robustness]
+A detector is $\epsilon$-certified \emph{masking robust} at an
+anomalous window $x^\ast$ iff
+$\inf_{\lVert x' - x^\ast\rVert_\infty \le \epsilon} \score(x') \ge \tau$.
+\end{definition}
+
+We instantiate the ball under two threat models: \emph{single-frame}
+(one time step perturbed; per-frame radii reported as the minimum over
+frames) and \emph{multi-frame} (all steps perturbed jointly---the
+operationally conservative model for an attacker with stream access).
+Over a set of windows, the fraction whose certified radius covers a
+target $\epsilon$ gives \emph{certified-robust FPR} (normal windows)
+and \emph{certified-robust TPR} (anomalous windows)---the direct
+analogue of certified accuracy for classifiers, at detector level.
+
+\subsection{Abstract autoencoder forward pass}
+
+We propagate the input zonotope through the encoder stack, broadcast
+the final top-layer hidden zonotope $Z_z$ into every decoder step, and
+apply the head per step, yielding reconstruction zonotopes
+$Z_{\hat{x}_t}$. Because the input frames are themselves zonotopes
+sharing generators with the network state, the residual
+$Z_{r_t} = Z_{\hat{x}_t} \ominus Z_{x_t}$ is computed \emph{in the
+shared generator space}, retaining input--output correlation; this is
+the step interval arithmetic cannot express and a key source of our
+advantage over IBP (\S\ref{sec:results}).
+
+\textbf{Sound score bounds.} With componentwise residual ranges
+$[l_{td}, u_{td}]$ from $Z_{r_t}$,
+\begin{equation}
+\label{eq:bounds}
+\score_{\ub} = \tfrac{1}{N}\textstyle\sum_{t,d} \max(|l_{td}|,|u_{td}|)^2,
+\qquad
+\score_{\lb} = \tfrac{1}{N}\textstyle\sum_{t,d} \max(0, l_{td}, -u_{td})^2,
+\end{equation}
+which are sound for the sup/inf of the score since a sum's extremum is
+bounded by the sum of componentwise extrema. $\score_{\ub} \le \tau$
+certifies false-alarm robustness; $\score_{\lb} \ge \tau$ certifies
+masking robustness.
+
+\textbf{Joint quadratic bound.} Equation~\eqref{eq:bounds} discards
+that every residual component is a function of the \emph{same}
+generator vector. Stacking the residual zonotopes into the union
+predicate space, $\score = \tfrac{1}{N}\lVert c + V\alpha\rVert^2$
+with $\alpha \in [-1,1]^P$, and
+\begin{equation}
+\label{eq:joint}
+\sup_\alpha\, \lVert c + V\alpha\rVert^2 \;\le\; \lVert c\rVert^2
+  + 2\lVert V^\top c\rVert_1 + \textstyle\sum_{ij}\bigl|(V^\top V)_{ij}\bigr|,
+\end{equation}
+which is provably no looser than \eqref{eq:bounds} (push the absolute
+values inside both inner products to recover it) and strictly tighter
+under cross-component cancellation. The cost is one Gram product per
+bound query, growing with the generator count $P$. On IEEE-9
+\eqref{eq:joint} enlarges certified radii by $1.26$--$1.53\times$
+(S/M/D) at $1.3$--$3\times$ query cost; at $H{=}64$ (L) the gain drops
+to $1.05\times$ (\S\ref{sec:results}). The analogous norm-based lower
+bound never beat the componentwise form in our measurements, so
+$\score_{\lb}$ retains \eqref{eq:bounds}. A terminal Shor-SDP
+relaxation of the box-QP is the natural next rung.
+
+\subsection{Predicate alignment, and an unsoundness pattern in the wild}
+\label{sec:aliasing}
+
+Zonotope transformers for recurrent networks repeatedly combine
+zonotopes born at different times: the previous state (carrying fresh
+generators from step $t{-}1$) and the current gate pre-activations
+(carrying fresh generators from step $t$). If implementations align
+generator matrices \emph{positionally} (zero-padding to equal width),
+two distinct noise symbols can silently share a column---and by the
+triangle inequality the merged $|V|$-sums \emph{shrink}, producing
+bounds tighter than the true reachable set: an unsound certificate.
+This is not hypothetical: the MATLAB star-set reference implementation
+we cross-validate against exhibits exactly this pattern on multi-layer
+models, certifying radii $6$--$9\%$ larger than the sound
+value on every frame of our two-layer IEEE-9 checkpoint
+(\S\ref{sec:results}). Our implementation assigns every generator a
+persistent identity and embeds operands into a unified predicate space
+(shared ids share columns; unshared get disjoint columns), which we
+validate by exhaustive per-transformer fuzzing against LP ground truth
+and end-to-end PGD probing. \todo{cite soundness proofs in appendix;
+port docs/soundness.md}
+
+\subsection{Complexity}
+
+For hidden width $H$, window length $T$, depth $L$: each LSTM step
+applies $O(H)$ bilinear transformers, each touching generator columns
+accumulated so far; fresh generators grow by $O(H)$ per (step, layer),
+so the abstract forward pass costs
+$O\!\big(T^2 L^2 H^2 (D+H)\big)$ arithmetic in the worst case
+\todo{verify constants; measure empirical exponents in E2}, against
+$O(TLH(D+H))$ for one concrete forward. The bisection multiplies either
+by $k{+}1$ (multi-frame) or $T(k{+}1)$ (single-frame, all frames).
+
+\section{Experimental setup}
+\label{sec:setup}
+
+\textbf{Tools.} (i) \textsc{Zono} (ours); (ii) \textsc{Ibp}: interval
+bound propagation implemented on the same model dicts (endpoint
+propagation through monotone gates, four-product interval
+multiplication); (iii) \textsc{Lirpa-Ibp} and (iv) \textsc{Crown}:
+auto\_LiRPA \citep{xu2020automatic} interval and backward modes on the
+explicit-op unrolled AE graph (fp32, its backward-mode requirement;
+all other tools fp64); (v) \textsc{Pgd}: multi-restart projected
+gradient attack on the concrete score, giving an empirical upper bound
+on every radius. Table~\ref{tab:tools} situates the non-runnable RNN
+verifiers: none supports the reconstruction-error property, and none
+has maintained code.
+
+\begin{table}[h]
+\caption{RNN verification tools vs.\ the requirements of the LSTM-AE
+detector property (as of 2026-08).}
+\label{tab:tools}
+\begin{center}
+\scriptsize
+\begin{tabular}{lcccc}
+\toprule
+ & LSTM & AE recon.\ spec & quadratic score & public code maintained \\
+\midrule
+POPQORN \citep{ko2019popqorn}      & \checkmark & -- & -- & dead (2020) \\
+Prover \citep{ryou2021scalable}    & \checkmark & -- & -- & dead (2021) \\
+RnnVerify \citep{jacoby2020rnnverify} & -- & -- & -- & dead (2020) \\
+Cert-RNN \citep{du2021certrnn}     & \checkmark & -- & -- & never released \\
+auto\_LiRPA \citep{xu2020automatic} & \checkmark & graph-expressible & assembled \eqref{eq:bounds} & active \\
+\textbf{Ours}                      & \checkmark & \checkmark & \checkmark\,(ub+lb) & released \\
+\bottomrule
+\end{tabular}
+\end{center}
+\end{table}
+
+\textbf{Fairness protocol.} Every sound tool answers the same predicate
+inside the same bisection ($\epsilon_0 = 0.5$, $k=12$ unless noted),
+and the quadratic score is assembled from componentwise residual
+bounds identically \eqref{eq:bounds} for all tools---so measured
+differences isolate the abstract domain. Single-thread BLAS; identical
+hardware (28-core Linux workstation); wall-clock and bound-call counts
+recorded per cell; JSONL results with environment stamps are shipped
+with the code.
+
+\textbf{Benchmarks.} (a) \emph{IEEE-9}: four LSTM-AE checkpoints
+trained on normalized IEEE-9 bus telemetry ($D{=}36$, $T{=}30$):
+S/M/L single-layer with $H \in \{4,16,64\}$ and D two-layer with
+$H{=}16$; thresholds $\tau$ calibrated on training scores; a MATLAB
+star-set implementation provides an independent reference (and the
+aliasing case study). (b) \emph{Synthetic lattice}: a deterministic
+generator trains detectors on seeded quasi-periodic multivariate
+processes at any $(H,T,D,L)$; sweeps vary one axis around center
+$(16,30,9,1)$: $H \le 128$, $T \le 120$, $D \le 72$, $L \le 3$; injected
+spike/step/dropout anomalies (flagged by the clean detector) provide
+masking subjects. (c) \emph{SMD} \citep{su2019robust}: server telemetry
+($D{=}38$), standard TSAD benchmark, for cross-domain generality.
+\todo{SMD results pending data download; wire Morris power-attack PMU
+dataset \citep{adhikari2018power}}
+
+\section{Results}
+\label{sec:results}
+
+\subsection{E1: Verifiability across tools}
+
+Table~\ref{tab:e1} reports certified radii on the four IEEE-9
+detectors (single-frame threat model, all 30 frames, $k{=}12$). Only
+the zonotope verifier completes the benchmark. Both interval variants
+certify nothing: their score upper bounds already exceed $\tau$ at the
+finest bisected radius $1.2\times10^{-4}$ (we verified the IBP
+implementation converges to the concrete score as
+$\epsilon \to 0$ and blows up by $\epsilon \approx 10^{-4}$ after 30
+LSTM steps---the compounding-looseness regime that motivates relational
+domains). CROWN on the unrolled graph exhausted a one-hour
+per-instance budget on \emph{every} size without completing a single
+30-frame case ($\ge 28$\,s per bound query $\times$ 30 frames
+$\times$ 13 queries $> 3$\,h); its tightness is therefore measured on
+the scaling family (\S\ref{sec:e2}), where full comparisons finish.
+PGD upper bounds leave a $14$--$34\times$ gap to the certified radii,
+analyzed in \S\ref{sec:e4}.
+
+\begin{table}[h]
+\caption{IEEE-9: certified radius (min over frames; mean in
+parentheses) and total wall-clock. \textsc{Zono} uses the
+componentwise bound \eqref{eq:bounds}; \textsc{Zono-J} the joint bound
+\eqref{eq:joint} on the same reach set. \textsc{Ibp} = our interval
+baseline; \textsc{Lirpa-Ibp/Crown} = auto\_LiRPA interval/backward.
+\textsc{Pgd} is an empirical \emph{upper} bound, not a certificate.
+Timeout = 3600\,s/instance.}
+\label{tab:e1}
+\begin{center}
+\scriptsize
+\setlength{\tabcolsep}{3.5pt}
+\begin{tabular}{llcccccc}
+\toprule
+ & $(H, L)$ & \textsc{Zono} & \textsc{Zono-J} (ours) & \textsc{Ibp} & \textsc{Lirpa-Ibp} & \textsc{Crown} & \textsc{Pgd} (ub) \\
+\midrule
+S & $(4,1)$  & 0.0128, 13\,s & \textbf{0.0161} (0.0273), 20\,s & 0 & 0 & t/o & $\le 0.178$ \\
+M & $(16,1)$ & 0.0133, 40\,s & \textbf{0.0204} (0.0249), 134\,s & 0 & 0 & t/o & $\le 0.115$ \\
+L & $(64,1)$ & 0.0230, 428\,s & \textbf{0.0241} (0.0301), 1758\,s & 0 & 0 & t/o & $\le 0.779$ \\
+D & $(16,2)$ & 0.0228, 111\,s & \textbf{0.0303} (0.0364), 457\,s & 0 & 0 & t/o & $\le 0.368$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+\end{table}
+
+\subsection{E2: Scalability}
+\label{sec:e2}
+
+Figure~\ref{fig:scaling} shows seconds per bound query against hidden
+width $H$ and window length $T$ on the synthetic lattice (each point a
+trained detector; 900\,s/instance budget). Empirical cost growth of the
+zonotope verifier is $\sim\!H^{1.6}$ ($0.038 \to 10.1$\,s/query from
+$H{=}4 \to 128$), $\sim\!T^{1.7}$ ($0.025 \to 1.71$\,s/query,
+$T{=}10 \to 120$), $\sim\!L^{1.7}$ ($0.13 \to 0.79$\,s/query,
+$L{=}1 \to 3$), and flat in $D$ ($0.13 \to 0.14$\,s/query,
+$D{=}9 \to 72$)---consistent with the generator-accumulation analysis
+of \S\ref{sec:method} dominated by the $H$ and $T$ terms. CROWN's
+per-query cost is nearly flat in $H$ ($27.6 \to 37$\,s; its unrolled
+backward pass is dominated by graph length), but its constant is
+$10^2$--$10^3\times$ ours and it exceeds the budget at $H{=}128$,
+where we finish in 261\,s. Tightness on the points where CROWN
+completes: its certified radius exceeds ours by $0.9$--$2.2\%$ for
+$H \le 32$ (e.g.\ $0.211$ vs $0.209$ at $H{=}4$) and by $22\%$ at
+$H{=}64$ ($0.0215$ vs $0.0176$)---so the zonotope cedes little
+tightness for orders of magnitude in speed. The interval tools mirror
+E1: competitive only on the smallest models ($0.158$ at $H{=}4$),
+collapsing to zero by $H{=}64$.
+
+\begin{figure}[t]
+\begin{center}
+\includegraphics[width=0.48\linewidth]{fig_scaling_H}\hfill
+\includegraphics[width=0.48\linewidth]{fig_scaling_T}
+\end{center}
+\caption{Cost per bound query (log--log) vs hidden width $H$ (left)
+and window length $T$ (right). $\times$ marks a budget timeout
+(CROWN at $H{=}128$).}
+\label{fig:scaling}
+\end{figure}
+
+\subsection{E3: Certified detection}
+
+On the synthetic center detector ($H{=}16$, $T{=}30$, $D{=}9$;
+multi-frame threat model, i.e.\ the attacker perturbs every step of
+the window jointly), we certify \emph{both} detector properties on
+all tested windows: 8/8 normal windows are false-alarm-robust with
+certified radii in $[0.0137, 0.0322]$ (median $0.023$), and 8/8
+flagged anomalous windows (spike, step, and channel-dropout classes)
+are masking-robust with radii in $[0.0176, 0.234]$ (median $0.068$).
+Masking radii are systematically larger than false-alarm radii: hiding
+an anomaly requires \emph{reducing} reconstruction error everywhere at
+once, which is harder than inflating it. Table~\ref{tab:e3} gives
+certified-robust detection rates at target radii; the interval
+baseline---which certifies nothing on IEEE-9---does certify this
+easier (smaller, well-trained) model, but its rates decay first as
+$\epsilon$ grows, and its radii are uniformly $\sim\!25$--$30\%$
+smaller than ours on the same windows.
+
+\begin{table}[h]
+\caption{Certified-robust detection rates: fraction of windows whose
+certified radius covers $\epsilon$ (multi-frame threat model).}
+\label{tab:e3}
+\begin{center}
+\small
+\begin{tabular}{llcccc}
+\toprule
+property & tool & $\epsilon{=}0.01$ & $0.015$ & $0.02$ & $0.03$ \\
+\midrule
+no false alarm ($\score \le \tau$) & \textsc{Zono} & 8/8 & 6/8 & 5/8 & 1/8 \\
+ & \textsc{Ibp} & 8/8 & 5/8 & 3/8 & 0/8 \\
+no masking ($\score \ge \tau$) & \textsc{Zono} & 8/8 & 8/8 & 7/8 & 7/8 \\
+ & \textsc{Ibp} & 8/8 & 7/8 & 7/8 & 7/8 \\
+\bottomrule
+\end{tabular}
+\end{center}
+\end{table}
+
+\subsection{E4: Tightness and ablations}
+\label{sec:e4}
+
+\textbf{Certified-vs-empirical gap.} With the componentwise bound the
+certified radius on IEEE-9~S is $0.0128$ while PGD first violates the
+property at $0.178$ ($14\times$); on D, $0.0228$ vs $0.368$
+($16\times$). The joint bound \eqref{eq:joint} closes part of this
+from the specification side ($11\times$ on S, $12\times$ on D); the
+remainder is zonotope over-approximation through the recurrence plus
+residual quadratic-bound slack. A terminal SDP relaxation and
+tighter bilinear transformers (\S\ref{sec:limitations}) target the
+rest. \todo{decompose the gap: score\_ub at PGD's radius vs at the
+certified radius}
+
+\textbf{Bisection depth.} Radius converges by $k{=}12$: on S,
+$0.0078$ ($k{=}6$), $0.0127$ ($k{=}9$), $0.0128$ ($k{=}12$), $0.0129$
+($k{=}15$), at near-linear cost in $k$ ($8 \to 18$\,s); $k{=}12$ is
+the default throughout.
+
+\textbf{Threat model.} Perturbing all 30 frames jointly shrinks
+IEEE-9 certified radii by $\sim\!17\times$ (S: $7.3\times10^{-4}$ vs
+$0.0128$; D: $1.1\times10^{-3}$ vs $0.0228$): per-frame certificates
+substantially overstate robustness against a stream-level attacker,
+which is why E3 reports the multi-frame model.
+
+\textbf{The aliasing case study.} The MATLAB star-set reference agrees
+with our engine to $10^{-10}$ on all single-layer IEEE-9 sizes but
+certifies $+1.7$--$2.7\times10^{-3}$ \emph{larger} radii ($6$--$9\%$)
+on every frame of the two-layer D model---the predicate-aliasing
+signature of \S\ref{sec:aliasing}: positional generator padding
+collapses distinct noise symbols, shrinking $|V|$-sums below the sound
+value. PGD cannot falsify those inflated certificates precisely
+because the quadratic-bound slack exceeds the aliasing inflation---an
+instructive failure mode: empirical attack probes are too weak to
+detect an unsound verifier whose specification bound is loose.
+
+\section{Limitations}
+\label{sec:limitations}
+
+Our certificates are $\ell_\infty$-ball guarantees around individual
+windows: they do not cover distribution shift, semantic attacks outside
+the ball, or windows not analyzed. The componentwise quadratic bound
+\eqref{eq:bounds} leaves measurable slack (E4); the auto\_LiRPA
+comparison runs in fp32 by that library's requirement; and our
+synthetic lattice, while controlled and reproducible, is a proxy---the
+public-data results carry the external-validity weight. Masking
+certificates hold at the analyzed anomalous windows and do not preclude
+attacks that suppress anomalies \emph{before} they manifest in the
+window.
+
+\section{Conclusion}
+
+We gave the first deterministic certification pipeline for LSTM
+autoencoder anomaly detectors---both false-alarm and masking
+robustness---together with a controlled cross-tool evaluation and
+reproducible benchmarks. The zonotope domain occupies the practical
+sweet spot between interval collapse and linear-relaxation cost, and
+detector-level certified FPR/TPR turns per-window radii into an
+operator-meaningful guarantee. We propose the benchmark suite for
+community adoption (e.g.\ VNN-COMP, which to date includes no recurrent
+or anomaly-detection tasks).
+
+\subsubsection*{Reproducibility statement}
+All experiments are driven by a results-record harness (JSONL with
+hardware/software stamps) shipped with the code; the synthetic
+benchmark family regenerates byte-identically from seeds; IEEE-9
+checkpoints, anchors, and thresholds are released. \todo{anonymized
+code link}
+
+\bibliography{refs}
+\bibliographystyle{iclr2027_conference}
+
+\appendix
+\section{Soundness of the transformers}
+\todo{port the transformer soundness statements and proofs
+(bilinear sigmoid-identity / sigmoid-tanh, alignment lemma) from
+docs/soundness.md.}
+
+\section{The predicate-aliasing pattern}
+\todo{port the mechanism (docs/lstm\_ae\_results.md \S\,``Why D
+diverges''): distinct fresh generators sharing a column index under
+positional padding; triangle-inequality shrinkage; per-frame deltas.}
+
+\section{Experiment details}
+\todo{hyperparameters, benchmark generator process, PGD config,
+timeout policy, hardware.}
+
+\end{document}

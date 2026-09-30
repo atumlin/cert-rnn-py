@@ -36,7 +36,11 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra"
+addopts = "-ra -m 'not nightly'"
+markers = [
+    "soundness: soundness-suite tests (tests/soundness)",
+    "nightly: large-budget soundness runs, excluded from the default run",
+]
 filterwarnings = [
     "ignore:TypedStorage is deprecated:UserWarning",
 ]

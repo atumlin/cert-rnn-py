@@ -145,10 +145,20 @@ def _lstm_step_case(name):
     for _ in range(T):
         z_h, z_c = lstm_step(z_x, z_h, z_c, W_in, W_rec, b)
 
+    # The Python engine prunes zero-width fresh generators (an
+    # arithmetic-neutral optimization the MATLAB reference lacks), so
+    # compare V matrices with all-zero columns removed from both sides;
+    # column ORDER of the surviving generators is still checked.
+    def _nonzero_cols(V):
+        V = np.atleast_2d(V)
+        return V[:, np.any(V != 0.0, axis=0)]
+
     np.testing.assert_allclose(z_h.c, _as_1d(data["h_c"]), atol=ATOL)
-    np.testing.assert_allclose(z_h.V, _as_2d(data["h_V"]), atol=ATOL)
+    np.testing.assert_allclose(
+        _nonzero_cols(z_h.V), _nonzero_cols(_as_2d(data["h_V"])), atol=ATOL)
     np.testing.assert_allclose(z_c.c, _as_1d(data["c_c"]), atol=ATOL)
-    np.testing.assert_allclose(z_c.V, _as_2d(data["c_V"]), atol=ATOL)
+    np.testing.assert_allclose(
+        _nonzero_cols(z_c.V), _nonzero_cols(_as_2d(data["c_V"])), atol=ATOL)
 
 
 def test_matlab_lstm_step_1step():

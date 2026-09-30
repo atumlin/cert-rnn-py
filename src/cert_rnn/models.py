@@ -160,11 +160,14 @@ class LSTMAutoencoder:
     head: dict
 
     @classmethod
-    def from_torch(cls, encoder, decoder, head) -> "LSTMAutoencoder":
+    def from_torch(cls, encoder, decoder, head,
+                   decoder_input: str = "latent") -> "LSTMAutoencoder":
         """Build from PyTorch modules. encoder/decoder may each be an
         nn.LSTM, nn.LSTMCell, or a sequence of nn.LSTMCell; head is an
-        nn.Linear back to input space."""
-        d = lstm_ae_to_model_dicts(encoder, decoder, head)
+        nn.Linear back to input space. decoder_input: "latent" (decoder
+        reads the encoder's final h every step) or "sequence" (decoder
+        step t reads the encoder's h at step t)."""
+        d = lstm_ae_to_model_dicts(encoder, decoder, head, decoder_input)
         return cls(d["encoder"], d["decoder"], d["head"])
 
     @property
