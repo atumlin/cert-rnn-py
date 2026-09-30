@@ -77,6 +77,82 @@ def test_radii_bit_identical_random_ae(threat):
 
 
 @pytest.mark.soundness
+@pytest.mark.parametrize("threat", ["single_frame", "multi_frame"])
+@pytest.mark.parametrize("score_bound", ["componentwise", "joint"])
+@pytest.mark.parametrize("zono_last", [None, 3])
+def test_radii_bit_identical_tier1(threat, score_bound, zono_last):
+    """Tier-1 (zono) gates, pure and with the round cutover, both score
+    bounds: sequential Algorithm 1 vs free-running parallel bisect, kary
+    sequential, kary parallel -- exact equality. Under the cutover, bisect
+    (13 rounds) and kary (4 rounds) put DIFFERENT probes in zono mode, so
+    there each search is compared only with its own serial run."""
+    from cert_rnn.analysis import reconstruction_score
+    from cert_rnn.transformers import bilinear_mode
+    rng = np.random.default_rng(SEED + 1)
+    enc, dec, head = _small_ae(rng)
+    x = rng.uniform(0, 1, (6, 3))
+    tau = 3.0 * reconstruction_score(enc, dec, head, x)
+    kw = dict(score_bound=score_bound, zono_last_rounds=zono_last)
+    if zono_last is None:
+        groups = [[("bisect", 1), ("bisect", 4), ("kary", 1), ("kary", 4)]]
+    else:
+        groups = [[("bisect", 1), ("bisect", 4)], [("kary", 1), ("kary", 4)]]
+    with bilinear_mode("zono"):
+        for group in groups:
+            ref = None
+            for search, n_workers in group:
+                reset_pred_allocator(0 if ref is None else 4242)
+                r, pf = certify_radius_spec_c(enc, dec, head, x, tau, 0.5, 12, threat,
+                                              search=search, probes=15,
+                                              n_workers=n_workers, **kw)
+                if ref is None:
+                    ref = (r, pf)
+                    continue
+                assert r == ref[0], (search, n_workers, r, ref[0])
+                if pf is not None:
+                    assert np.array_equal(pf, ref[1]), (search, n_workers, pf, ref[1])
+
+
+@pytest.mark.soundness
+def test_joint_score_bound_never_looser_in_search():
+    """The joint score bound only ever certifies MORE (never looser)."""
+    from cert_rnn.analysis import reconstruction_score
+    rng = np.random.default_rng(SEED + 2)
+    enc, dec, head = _small_ae(rng)
+    x = rng.uniform(0, 1, (6, 3))
+    tau = 3.0 * reconstruction_score(enc, dec, head, x)
+    rc, _ = certify_radius_spec_c(enc, dec, head, x, tau, 0.5, 12, "multi_frame")
+    rj, _ = certify_radius_spec_c(enc, dec, head, x, tau, 0.5, 12, "multi_frame",
+                                  score_bound="joint")
+    assert rj >= rc, (rj, rc)
+
+
+@pytest.mark.soundness
+@pytest.mark.parametrize("threat", ["single_frame", "multi_frame"])
+def test_tier1_threads_bit_identical(threat):
+    """Threads over coordinates inside the Tier-1 gate step change nothing:
+    identical reach zonotopes for THREADS = 1 and 4."""
+    from cert_rnn import tier1
+    from cert_rnn.transformers import bilinear_mode
+    rng = np.random.default_rng(SEED + 3)
+    enc, dec, head = _small_ae(rng, D=4, H=8)
+    x = rng.uniform(0, 1, (6, 4))
+    t = 0 if threat == "single_frame" else None
+    out = []
+    try:
+        for th in (1, 4):
+            tier1.THREADS = th
+            reset_pred_allocator(0)
+            with bilinear_mode("zono"):
+                out.append(lstm_ae_reach(enc, dec, head, x, 0.05, threat, t))
+    finally:
+        tier1.THREADS = 1
+    for za, zb in zip(out[0][0] + out[0][1], out[1][0] + out[1][1]):
+        assert np.array_equal(za.c, zb.c) and np.array_equal(za.V, zb.V)
+        assert za.pred_ids == zb.pred_ids
+
+
+@pytest.mark.soundness
 def test_allocator_offset_invariance():
     """The absolute predicate-id offset must not change any zonotope: same
     reach from allocator start 0 vs 10^6 gives identical (c, V) and the same

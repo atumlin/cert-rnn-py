@@ -74,19 +74,23 @@ def concrete_lstm_ae_forward(encoder, decoder, head, X):
         X = X[None]
     N, T, D = X.shape
 
+    from cert_rnn.verify import decoder_input
+
     enc_layers, dec_layers = encoder["layers"], decoder["layers"]
     h_e = [np.zeros((N, ly["W_rec"].shape[1])) for ly in enc_layers]
     c_e = [np.zeros_like(h) for h in h_e]
+    codes = []
     for t in range(T):
-        _stack_step(X[:, t, :], h_e, c_e, enc_layers)
-    latent = h_e[-1]                                         # (N, H)
+        codes.append(_stack_step(X[:, t, :], h_e, c_e, enc_layers).copy())
+    if decoder_input(decoder) == "latent":
+        codes = [codes[-1]] * T                              # (N, H) each
 
     h_d = [np.zeros((N, ly["W_rec"].shape[1])) for ly in dec_layers]
     c_d = [np.zeros_like(h) for h in h_d]
     Wh, bh = head["W"], head["b"]
     x_hat = np.empty((N, T, D))
     for t in range(T):
-        top = _stack_step(latent, h_d, c_d, dec_layers)
+        top = _stack_step(codes[t], h_d, c_d, dec_layers)
         x_hat[:, t, :] = top @ Wh.T + bh
     return x_hat[0] if single else x_hat
 
@@ -389,7 +393,8 @@ def preflight(encoder, decoder, head, x_anchor, tau=None,
                 f"tool score {score:.6g} != torch score {model_score:.6g} "
                 f"(|diff|={diff:.2e}) -- the extracted model does NOT "
                 f"compute the same function; check the topology mapping "
-                f"(latent fed to decoder each step, per-step head)")
+                f"(decoder input = {decoder.get('input', 'latent')}, "
+                f"per-step head)")
     return done()
 
 

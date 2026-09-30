@@ -230,18 +230,23 @@ def instrumented_lstm_ae_reach(encoder, decoder, head, x_anchor, eps,
     T, _D = x_anchor.shape
     z_x_seq = _build_input_zonos(x_anchor, eps, threat_model, t_pert)
 
+    from cert_rnn.verify import decoder_input
+
     rec.phase = "enc"
     z_h_enc, z_c_enc = lstm_state_init(H, L_enc)
+    z_codes = []
     for t in range(T):
         z_h_enc, z_c_enc = instrumented_lstm_step_stack(
             z_x_seq[t], z_h_enc, z_c_enc, encoder["layers"], alloc, rec, t)
-    z_latent = z_h_enc[-1]
+        z_codes.append(z_h_enc[-1])
+    if decoder_input(decoder) == "latent":
+        z_codes = [z_codes[-1]] * T
 
     rec.phase = "dec"
     z_h_dec, z_c_dec = lstm_state_init(H, L_dec)
     z_x_hat_seq = []
     for t in range(T):
         z_h_dec, z_c_dec = instrumented_lstm_step_stack(
-            z_latent, z_h_dec, z_c_dec, decoder["layers"], alloc, rec, t)
+            z_codes[t], z_h_dec, z_c_dec, decoder["layers"], alloc, rec, t)
         z_x_hat_seq.append(z_h_dec[-1].affine_map(head["W"], head["b"]))
     return z_x_hat_seq, z_x_seq, rec

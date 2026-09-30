@@ -63,6 +63,20 @@ DIR_TOL = 1e-3
 # accumulates {"dirs_raw": .., "dirs_kept": .., "cells_admitted": ..,
 # "cells_total": .., "skip_area": .., "skip_admit": .., "coords": ..}.
 STATS = None
+# Threads for the per-coordinate grid covers in c1c2_over_zono (read at call
+# time). Coordinates are independent and results are gathered in coordinate
+# order, so any value gives bit-identical output; >1 only pays when cores
+# are spare (numpy releases the GIL in the heavy support/SAT products).
+THREADS = 1
+_POOL = None
+
+
+def _pool():
+    global _POOL
+    if _POOL is None or _POOL._max_workers != THREADS:
+        from concurrent.futures import ThreadPoolExecutor
+        _POOL = ThreadPoolExecutor(max_workers=THREADS)
+    return _POOL
 
 
 def _area_ratio(gx, gy, wx, wy):
@@ -171,24 +185,30 @@ def c1c2_over_zono(kind, A, B, cx, cy, Vx, Vy, lx, ux, ly, uy,
     all_cells = []
     owners = []
     wx = ux - lx; wy = uy - ly
-    for k in range(K):
+
+    def cover(k):
         if STATS is not None:
             STATS["coords"] = STATS.get("coords", 0) + 1
         if C2_box[k] - C1_box[k] <= 0.0 or not (wx[k] > 0 and wy[k] > 0):
-            continue
+            return None
         if _area_ratio(Vx[k], Vy[k], wx[k], wy[k]) > HEADROOM_SKIP:
             if STATS is not None:
                 STATS["skip_area"] = STATS.get("skip_area", 0) + 1
-            continue
+            return None
         cells = admitted_cells(cx[k], cy[k], Vx[k], Vy[k],
                                lx[k], ux[k], ly[k], uy[k], n)
+        if cells is None or cells[0].shape[0] >= n * n:
+            return None   # all cells admitted: identical to the box result
+        return cells
+
+    # STATS is a shared dict: keep instrumented runs serial
+    covers = (list(_pool().map(cover, range(K))) if THREADS > 1 and STATS is None
+              else [cover(k) for k in range(K)])
+    for k, cells in enumerate(covers):
         if cells is None:
             continue
-        m = cells[0].shape[0]
-        if m >= n * n:
-            continue   # every cell admitted: identical to the box result
         all_cells.append(cells)
-        owners.append(np.full(m, k))
+        owners.append(np.full(cells[0].shape[0], k))
     if not all_cells:
         return C1, C2
     clx = np.concatenate([c[0] for c in all_cells])

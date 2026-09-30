@@ -19,6 +19,10 @@ Threat models:
   - 'multi_frame': every frame perturbed independently with disjoint
     pred_ids. Sound under this port's Minkowski-padded lstm_step; the
     MATLAB reference is unsound here.
+  - 'frame_set': the frames in t_pert (a tuple of indices) are perturbed
+    jointly, the others pinned. Same input construction as multi_frame
+    restricted to those frames; a single frame reproduces single_frame
+    and all frames reproduce multi_frame exactly.
 
 Algorithm 1 (Du et al., CCS 2021): start at eps_init; at iteration l
 in [2, n_iters+1], add 0.5^l if certify holds at eps, else subtract
@@ -35,7 +39,7 @@ from cert_rnn.lstm import lstm_state_init, lstm_step_stack
 from cert_rnn.rnn import rnn_step
 from cert_rnn.zono import Zono, zono_sub
 
-ThreatModel = Literal["single_frame", "multi_frame"]
+ThreatModel = Literal["single_frame", "multi_frame", "frame_set"]
 
 
 # ---------- Algorithm 1 ----------
@@ -85,6 +89,14 @@ def _build_input_zonos(
             else:
                 out.append(Zono.point(x_seq[t]))
         return out
+    if threat_model == "frame_set":
+        frames = sorted(set(int(f) for f in (t_pert or ())))
+        if not frames:
+            raise ValueError("frame_set requires a non-empty tuple of frames")
+        if frames[0] < 0 or frames[-1] >= T:
+            raise ValueError(f"frame_set frames {frames} out of range [0, {T})")
+        return [Zono.from_box(x_seq[t], eps) if (t in frames and eps > 0)
+                else Zono.point(x_seq[t]) for t in range(T)]
     if threat_model == "multi_frame":
         return [
             Zono.from_box(x_seq[t], eps) if eps > 0 else Zono.point(x_seq[t])
@@ -128,32 +140,49 @@ def lstm_ae_reach(
     threat_model: ThreatModel = "single_frame",
     t_pert: int | None = None,
 ) -> tuple[list[Zono], list[Zono]]:
-    """Forward an LSTM autoencoder: encoder over x_anchor, decoder reads
-    the latent (encoder's final top-layer h) at every step, per-step
-    head produces a reconstruction zono per timestep.
+    """Forward an LSTM autoencoder: encoder over x_anchor, decoder input
+    per decoder_input(decoder) -- "latent": the encoder's final top-layer
+    h at every step; "sequence": the encoder's top-layer h at the same
+    step -- and a per-step head produces a reconstruction zono per
+    timestep.
 
     Returns (z_x_hat_seq, z_x_seq) for downstream spec_c_score_ub.
     """
     H = encoder["H"]
     L_enc, L_dec = encoder["L"], decoder["L"]
     T, D = x_anchor.shape
+    mode = decoder_input(decoder)
     z_x_seq = _build_input_zonos(x_anchor, eps, threat_model, t_pert)
 
     z_h_enc, z_c_enc = lstm_state_init(H, L_enc)
+    z_codes: list[Zono] = []
     for t in range(T):
         z_h_enc, z_c_enc = lstm_step_stack(
             z_x_seq[t], z_h_enc, z_c_enc, encoder["layers"]
         )
-    z_latent = z_h_enc[-1]
+        z_codes.append(z_h_enc[-1])
+    if mode == "latent":
+        z_codes = [z_codes[-1]] * T
 
     z_h_dec, z_c_dec = lstm_state_init(H, L_dec)
     z_x_hat_seq: list[Zono] = []
-    for _t in range(T):
+    for t in range(T):
         z_h_dec, z_c_dec = lstm_step_stack(
-            z_latent, z_h_dec, z_c_dec, decoder["layers"]
+            z_codes[t], z_h_dec, z_c_dec, decoder["layers"]
         )
         z_x_hat_seq.append(z_h_dec[-1].affine_map(head["W"], head["b"]))
     return z_x_hat_seq, z_x_seq
+
+
+def decoder_input(decoder: dict) -> str:
+    """What the decoder reads at step t: "latent" (default) = the encoder's
+    final top-layer h (one code per window); "sequence" = the encoder's
+    top-layer h at step t (one code per step; encoder+decoder is then a
+    stacked LSTM with a per-step head)."""
+    mode = decoder.get("input", "latent")
+    if mode not in ("latent", "sequence"):
+        raise ValueError(f"unknown decoder input {mode!r}")
+    return mode
 
 
 # ---------- specs ----------
@@ -299,12 +328,19 @@ def spec_c_holds(
     tau: float,
     threat_model: ThreatModel = "single_frame",
     t_pert: int | None = None,
+    score_bound: str = "componentwise",
 ) -> bool:
-    """Spec C wrapper: True iff sound score_ub <= tau."""
+    """Spec C wrapper: True iff sound score_ub <= tau. score_bound:
+    "componentwise" (spec_c_score_ub) or "joint" (spec_c_score_ub_joint,
+    never looser)."""
+    if score_bound not in ("componentwise", "joint"):
+        raise ValueError(f"unknown score_bound {score_bound!r}")
     z_xh, z_x = lstm_ae_reach(
         encoder, decoder, head, x_anchor, eps, threat_model, t_pert
     )
-    return spec_c_score_ub(z_xh, z_x) <= tau
+    ub = (spec_c_score_ub_joint(z_xh, z_x) if score_bound == "joint"
+          else spec_c_score_ub(z_xh, z_x))
+    return ub <= tau
 
 
 # ---------- k-ary epsilon search (Phase 1 throughput, 2b) ----------
@@ -395,6 +431,8 @@ def _init_worker(payload: dict) -> None:
     set_bilinear_mode(payload.get("bilinear_mode", "box"))
     from cert_rnn.transformers import set_tilt_mode
     set_tilt_mode(payload.get("tilt_mode", "cornerfit"))
+    from cert_rnn import tier1
+    tier1.THREADS = int(payload.get("tier1_threads", 1))
 
 
 def _worker_probe(job):
@@ -410,7 +448,8 @@ def _worker_probe(job):
     def probe():
         if P["spec"] == "c":
             return spec_c_holds(P["encoder"], P["decoder"], P["head"], P["x"],
-                                eps, P["tau"], P["threat_model"], t)
+                                eps, P["tau"], P["threat_model"], t,
+                                P.get("score_bound", "componentwise"))
         return spec_a_margin(P["model_dict"], P["x"], eps, P["true_class"],
                              P["threat_model"], t)
 
@@ -418,6 +457,26 @@ def _worker_probe(job):
         return probe()
     with bilinear_mode(mode):
         return probe()
+
+
+def _worker_bisect_frame(job):
+    """job = (frame, eps_init, n_iters, modes): the whole Algorithm-1 walk
+    for ONE frame inside a worker. Same eps sequence and same per-round
+    mode schedule (`modes[r]`, 0-based round) as the lockstep walk in
+    _search_frames, so the radius is bit-identical to it."""
+    t, eps_init, n_iters, modes = job
+    eps, best, r = eps_init, 0.0, 0
+    for ell in range(2, n_iters + 2):
+        e = max(eps, 0.0)
+        if _worker_probe((t, e, modes[r])):
+            best = max(best, e)
+            eps = e + 0.5 ** ell
+        else:
+            eps = e - 0.5 ** ell
+        r += 1
+    if _worker_probe((t, eps, modes[r])) and eps > 0:
+        best = max(best, eps)
+    return best
 
 
 def _search_frames(
@@ -443,11 +502,20 @@ def _search_frames(
     rejections can steer the walk lower, so the result is >= the all-box
     radius and <= the all-zono radius. None = current mode everywhere.
 
+    Parallel bisect over several frames is FREE-RUNNING: each frame's whole
+    walk is one pool task (_worker_bisect_frame), so no frame waits for the
+    slowest frame of every round. Frames are submitted in order; early
+    frames (their perturbation flows through every later step) are the
+    slowest, so this is also longest-first. Frames' walks are independent,
+    so radii stay bit-identical to the lockstep walk.
+
     Returns (per-frame radii, sequential rounds)."""
+    from cert_rnn import tier1
     from cert_rnn.transformers import get_bilinear_mode, get_tilt_mode
 
     session_mode = get_bilinear_mode()
-    payload = dict(payload, bilinear_mode=session_mode, tilt_mode=get_tilt_mode())
+    payload = dict(payload, bilinear_mode=session_mode, tilt_mode=get_tilt_mode(),
+                   tier1_threads=tier1.THREADS)
     if search not in ("bisect", "kary"):
         raise ValueError(f"unknown search {search!r}")
 
@@ -531,6 +599,12 @@ def _search_frames(
 
     with ProcessPoolExecutor(max_workers=n_workers, initializer=_init_worker,
                              initargs=(payload,)) as ex:
+        if search == "bisect" and len(frames) > 1:
+            modes = [mode_for_round(r) for r in range(1, total_rounds + 1)]
+            best = list(ex.map(_worker_bisect_frame,
+                               [(t, eps_init, n_iters, modes) for t in frames],
+                               chunksize=1))
+            return np.array(best), total_rounds
         return walk(lambda jobs: list(
             ex.map(_worker_probe, jobs,
                    chunksize=max(1, len(jobs) // (4 * n_workers)))))
@@ -585,15 +659,29 @@ def certify_radius_spec_c(
     probes: int = 15,
     n_workers: int = 1,
     zono_last_rounds: int | None = None,
+    score_bound: str = "componentwise",
+    frames: tuple | None = None,
 ) -> tuple[float, np.ndarray | None]:
-    """Epsilon search for Spec C. Same shape/options as certify_radius_spec_a."""
+    """Epsilon search for Spec C. Same shape/options as certify_radius_spec_a;
+    score_bound selects the score upper bound ("componentwise" | "joint");
+    frames = the perturbed frames for threat_model="frame_set" (one joint
+    search, returns (eps, None))."""
+    if score_bound not in ("componentwise", "joint"):
+        raise ValueError(f"unknown score_bound {score_bound!r}")
     payload = {"spec": "c", "encoder": encoder, "decoder": decoder, "head": head,
-               "x": x_anchor, "tau": tau, "threat_model": threat_model}
+               "x": x_anchor, "tau": tau, "threat_model": threat_model,
+               "score_bound": score_bound}
     if threat_model == "single_frame":
         frames = list(range(x_anchor.shape[0]))
         per_frame, _ = _search_frames(payload, frames, eps_init, n_iters,
                                       search, probes, n_workers, zono_last_rounds)
         return float(per_frame.min()), per_frame
-    r, _ = _search_frames(payload, [None], eps_init, n_iters, search, probes,
+    if threat_model == "frame_set":
+        if not frames:
+            raise ValueError("threat_model='frame_set' requires frames")
+        item = tuple(sorted(set(int(f) for f in frames)))
+    else:
+        item = None
+    r, _ = _search_frames(payload, [item], eps_init, n_iters, search, probes,
                           n_workers, zono_last_rounds)
     return float(r[0]), None

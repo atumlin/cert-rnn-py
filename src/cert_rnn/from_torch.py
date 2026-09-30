@@ -180,21 +180,29 @@ def lstm_ae_to_model_dicts(
     encoder: "nn.LSTM | nn.LSTMCell | Sequence[nn.LSTMCell]",
     decoder: "nn.LSTM | nn.LSTMCell | Sequence[nn.LSTMCell]",
     head: nn.Linear,
+    decoder_input: str = "latent",
 ) -> dict:
     """Extract the three Cert-RNN dicts (encoder, decoder, head) for an
     LSTM autoencoder from PyTorch modules.
 
-    Assumes the Spec-C autoencoder topology used by cert_rnn.verify:
-    the decoder reads the encoder's final top-layer hidden state (the
-    latent, dim H) at every timestep, and a per-step linear head maps the
-    decoder's top hidden state (dim H_dec) back to the input space (dim D).
+    Assumes the Spec-C autoencoder topology used by cert_rnn.verify: at
+    every timestep the decoder reads an encoder top-layer hidden state
+    (dim H) -- decoder_input="latent": the FINAL one (one code per window);
+    "sequence": the one at the same timestep (one code per step) -- and a
+    per-step linear head maps the decoder's top hidden state (dim H_dec)
+    back to the input space (dim D). decoder_input is stored as
+    decoder["input"].
 
     Returns {"encoder", "decoder", "head", "H", "D"} where encoder/decoder
     are head-less stack dicts and head is {"W": (D, H_dec), "b": (D,)}.
     Consumable directly by cert_rnn.verify.lstm_ae_reach / spec_c_holds.
     """
+    if decoder_input not in ("latent", "sequence"):
+        raise ValueError(f"unknown decoder_input {decoder_input!r}")
     enc = _extract_lstm_stack(encoder, "encoder")
     dec = _extract_lstm_stack(decoder, "decoder")
+    if decoder_input != "latent":
+        dec["input"] = decoder_input
     if not isinstance(head, nn.Linear):
         raise TypeError(f"head must be nn.Linear, got {type(head).__name__}")
     head_d = _fc_dict(head)
@@ -202,7 +210,7 @@ def lstm_ae_to_model_dicts(
     if dec["D"] != H:
         raise ValueError(
             f"decoder input size {dec['D']} must equal encoder hidden H={H} "
-            "(the decoder reads the latent at every step)"
+            "(the decoder reads an encoder hidden state at every step)"
         )
     if head_d["W"].shape[1] != dec["H"]:
         raise ValueError(
