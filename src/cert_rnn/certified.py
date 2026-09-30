@@ -118,8 +118,15 @@ def iv_div_pos(a, dlo, dhi):
     with np.errstate(divide="ignore", invalid="ignore"):
         q_hi_end = np.where(dhi > 0, a / dhi, np.nan)      # closest to 0
         q_lo_end = np.where(dlo > 0, a / dlo, np.nan)      # farthest from 0
-    far = np.where(dlo > 0, q_lo_end, np.sign(a) * _INF)
-    far = np.where(a == 0.0, 0.0, far)
+    # +-inf only where the quotient is unbounded (dlo == 0, a != 0); built
+    # by masks so 0 * inf is never formed (same values as the unmasked form,
+    # whose nan entries at a == 0 were overwritten by 0 anyway).
+    a_b, dlo_b = np.broadcast_arrays(a, dlo)
+    unbounded = ~(dlo_b > 0)
+    far = np.where(unbounded, 0.0, q_lo_end)
+    inf_side = unbounded & (a_b != 0.0)
+    far[inf_side] = np.sign(a_b[inf_side]) * _INF
+    far = np.where(a_b == 0.0, 0.0, far)
     near = np.where(dhi > 0, q_hi_end, far)
     lo = np.minimum(near, far); hi = np.maximum(near, far)
     return _out(lo, hi)
