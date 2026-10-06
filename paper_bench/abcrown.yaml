@@ -1,0 +1,26 @@
+# alpha-beta-CROWN configuration for the LSTM-AE score graph.
+# Model, spec, device and timeout are passed per query on the command line.
+# GenBaB: branch-and-bound with nonlinear branching over the sigmoid / tanh /
+# multiplication nodes of the unrolled LSTM.
+general:
+  conv_mode: matrix
+  verify_onnxruntime_output: true
+attack:
+  pgd_order: before          # alpha-beta-CROWN's own falsifier first
+  pgd_restarts: 10
+solver:
+  batch_size: 64
+  auto_enlarge_batch_size: true
+  min_batch_size_ratio: 0.0
+  alpha-crown:
+    iteration: 100
+  beta-crown:
+    iteration: 30
+bab:
+  pruning_in_iteration: false
+  branching:
+    method: nonlinear
+    candidates: 20
+    nonlinear_split:
+      method: bbps
+      num_branches: 2

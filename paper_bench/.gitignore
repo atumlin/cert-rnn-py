@@ -1,0 +1,6 @@
+.venv/
+.py311/
+third_party/
+work/
+results_quick/
+work_quick/

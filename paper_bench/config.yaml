@@ -1,0 +1,58 @@
+# Benchmark suite configuration (PLAN.md). Every script reads this file.
+
+work_dir: work            # relative to paper_bench/; git-ignored (data, models, raw outputs)
+results_dir: results      # relative to paper_bench/; tables/figures/JSONL meant to be shared
+
+benchmarks:
+  grid9:     {source: grid, case: case9,  window: 10, layers: 1, seeds: [0, 1, 2], slow_tools: true}
+  grid14:    {source: grid, case: case14, window: 10, layers: 1, seeds: [0]}
+  grid30:    {source: grid, case: case30, window: 10, layers: 1, seeds: [0]}
+  grid9_T20: {source: grid, case: case9,  window: 20, layers: 1, seeds: [0]}
+  grid9_T30: {source: grid, case: case9,  window: 30, layers: 1, seeds: [0]}
+  grid9_L2:  {source: grid, case: case9,  window: 10, layers: 2, seeds: [0]}
+  zoneA:     {source: dir,                window: 10, layers: 1, seeds: [0, 1, 2], slow_tools: true}
+
+grid:                     # stand-in simulation (data.generate_grid)
+  baseline_s: 10800       # 3 h normal operation
+  scenario_s: 3600        # 1 h scenario
+  n_events: 24
+  seed: 7
+
+train:
+  epochs: 100
+  batch_size: 16
+  lr: 0.001
+  threads: 4              # torch CPU threads during training
+  tau_rule: val_p99.9     # threshold: 99.9th percentile of validation scores
+  n_windows: 10           # verified windows per model
+  window_seed: 0
+
+protocol:
+  eps: [0.0005, 0.001, 0.003, 0.01]
+  attacks: [persistent, burst, transient_first, transient_middle, transient_last]
+  radius: {eps_init: 0.5, n_iters: 12}
+
+tools:                    # budget = per-query wall-clock seconds
+  certrnn:      {kind: certrnn, gates: box,  score: componentwise, device: cpu,  budget: 300}
+  certrnn_plus: {kind: certrnn, gates: zono, score: joint,         device: cpu,  budget: 300}
+  ibp:          {kind: lirpa,   method: IBP,             device: cuda, budget: 300}
+  crown:        {kind: lirpa,   method: CROWN,           device: cuda, budget: 300}
+  alpha_crown:  {kind: lirpa,   method: CROWN-Optimized, device: cuda, budget: 3600, slow: true}
+  abcrown:      {kind: abcrown,                          device: cuda, budget: 1800, slow: true}
+  pgd:          {kind: pgd, restarts: 10, steps: 100,    device: cuda, budget: 300, attack: true}
+
+hardware:
+  recommended: {cpu_workers: 24}          # tools use their own device above
+  fair:        {cpu_workers: 1, device: cpu}  # every tool on one CPU process
+
+quick:                    # reproduce.sh --quick: tiny smoke version of everything
+  benchmarks: [grid9]
+  seeds: [0]
+  n_windows: 2
+  epochs: 5
+  eps: [0.001]
+  attacks: [persistent, transient_first]
+  baseline_s: 1800
+  scenario_s: 900
+  n_events: 6
+  budget_cap: 120         # per-query budget cap for every tool in quick mode

@@ -27,12 +27,21 @@ dev = [
     "pytest>=7.4",
     "pytest-xdist>=3.5",
 ]
+bench = [
+    "pandas>=2.0",
+    "pandapower>=2.13",
+    "numba>=0.59",
+    "matplotlib>=3.7",
+    "scikit-learn>=1.3",
+    "pyyaml>=6.0",
+]
 
 [project.scripts]
 cert-rnn = "cert_rnn.cli:main"
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["src", "."]
+include = ["cert_rnn*", "paper_bench*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
