@@ -166,6 +166,18 @@ class Stopwatch:
         return False
 
 
+THREAD_VARS = ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMBA_NUM_THREADS")
+
+
+def single_thread_env() -> None:
+    """Make spawned pool workers start single-threaded. Must run in the parent
+    before the pool starts: a worker imports numpy/torch while unpickling its
+    task, before any initializer, so setting these inside the worker is too late
+    (24 workers x 28 BLAS threads each made the machine ~25x oversubscribed)."""
+    for v in THREAD_VARS:
+        os.environ[v] = "1"
+
+
 def deep_update(base: dict, upd: dict) -> dict:
     out = copy.deepcopy(base)
     for k, v in upd.items():

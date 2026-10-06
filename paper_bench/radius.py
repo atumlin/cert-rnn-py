@@ -17,10 +17,11 @@ import argparse
 import json
 import os
 import time
+import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from paper_bench.check import tool_order
-from paper_bench.common import (ResultLog, atomic_write_json, attack_frames, load_config, model_dir,
+from paper_bench.common import (ResultLog, single_thread_env, atomic_write_json, attack_frames, load_config, model_dir,
                                 model_ids, results_dir, work_dir)
 
 _W: dict = {}
@@ -62,7 +63,6 @@ def search(tool, ctx, bench, seed, w, attack, state_path, rcfg, hardware):
 
 
 def _init_worker(mdir, name, tcfg, hardware):
-    os.environ.setdefault("OMP_NUM_THREADS", "1")
     from cert_rnn import tier1
     from paper_bench.tools import ModelContext, make_tool
     tier1.THREADS = 1
@@ -79,6 +79,7 @@ def main():
     ap.add_argument("--bench", nargs="*")
     ap.add_argument("--tools", nargs="*")
     ap.add_argument("--windows", type=int, help="only the first N verified windows (pilot)")
+    ap.add_argument("--seeds", nargs="*", type=int, help="only these seeds")
     ap.add_argument("--quick", action="store_true")
     ap.add_argument("--config")
     args = ap.parse_args()
@@ -89,6 +90,8 @@ def main():
     workers = cfg["hardware"][args.hardware]["cpu_workers"]
     rcfg, attacks = cfg["protocol"]["radius"], cfg["protocol"]["attacks"]
     for bench, seed in model_ids(cfg, args.bench):
+        if args.seeds is not None and seed not in args.seeds:
+            continue
         mdir = model_dir(cfg, bench, seed)
         if not (mdir / "meta.json").exists():
             print(f"[{bench}/seed{seed}] not trained yet; skipping")
@@ -110,7 +113,11 @@ def main():
             print(f"[{bench}/seed{seed}] {name}: {len(jobs)} searches to run", flush=True)
             t0 = time.perf_counter()
             if tcfg["kind"] == "certrnn" and workers > 1:
-                with ProcessPoolExecutor(min(workers, len(jobs)), initializer=_init_worker,
+                single_thread_env()
+                # spawn, not fork: the parent already started torch thread pools / CUDA (PGD),
+                # and forked children can deadlock on locks held at fork time
+                with ProcessPoolExecutor(min(workers, len(jobs)), mp_context=mp.get_context("spawn"),
+                                         initializer=_init_worker,
                                          initargs=(mdir, name, tcfg, args.hardware)) as ex:
                     for fut in as_completed([ex.submit(_worker, j) for j in jobs]):
                         log.append(fut.result())
