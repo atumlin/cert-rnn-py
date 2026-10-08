@@ -30,7 +30,7 @@ import numpy as np
 import torch
 
 from paper_bench.common import HERE, Stopwatch, Timeout, time_limit
-from paper_bench.model import ScoreGraph, V3AE, to_certrnn
+from paper_bench.model import AttackScore, ScoreGraph, V3AE, to_certrnn
 
 
 # --------------------------------------------------------------------------- #
@@ -53,6 +53,11 @@ class ModelContext:
             g = self.graph("cpu", torch.float64)(torch.as_tensor(self.windows.reshape(len(self.windows), -1)))
         diff = float(np.max(np.abs(g.numpy().ravel() - self.ae.score(self.windows))))
         assert diff < 1e-9, f"score graph != cert-rnn model (max |diff| {diff:.2e})"
+        for fr in ([0], list(range(self.T))):           # attacked-readings encoding, same function
+            a = AttackScore(self.graph("cpu", torch.float64), self.windows[0], fr)
+            with torch.no_grad():
+                s = float(a(torch.as_tensor(self.windows[0][fr].reshape(1, -1))))
+            assert abs(s - g[0, 0].item()) < 1e-9, f"AttackScore != score graph ({s} vs {g[0, 0].item()})"
 
     def graph(self, device: str, dtype=torch.float32) -> ScoreGraph:
         k = (device, dtype)
@@ -122,56 +127,50 @@ class CertRNN:
 class Lirpa:
     def __init__(self, name, cfg, device):
         self.name, self.budget, self.method, self.device = name, cfg["budget"], cfg["method"], device
+        # float64 by default: alpha-CROWN's optimisation through the unrolled LSTM breaks down in
+        # float32 (bounds looser than plain CROWN); the zonotope tools also run in float64
+        self.dtype = getattr(torch, cfg.get("dtype", "float64"))
         self._bm = {}
 
-    def _bounded(self, ctx):
+    def _bounded(self, ctx, w, frames):
         from auto_LiRPA import BoundedModule
-        k = id(ctx)
+        k = (id(ctx), w, tuple(frames))
         if k not in self._bm:
             self._bm.clear()
-            g = ctx.graph(self.device)
-            dummy = torch.zeros(1, ctx.T * ctx.D, device=self.device)
-            self._bm[k] = BoundedModule(g, dummy, device=self.device, verbose=0)
+            net = AttackScore(ctx.graph(self.device, self.dtype), ctx.windows[w], frames).eval()
+            dummy = torch.zeros(1, len(frames) * ctx.D, dtype=self.dtype, device=self.device)
+            self._bm[k] = BoundedModule(net, dummy, device=self.device, verbose=0)
         return self._bm[k]
 
     def check(self, ctx: ModelContext, w: int, frames, eps: float):
         from auto_LiRPA import BoundedTensor, PerturbationLpNorm
 
         def run():
-            bm = self._bounded(ctx)
-            x0 = torch.as_tensor(ctx.windows[w].reshape(1, -1), dtype=torch.float32, device=self.device)
-            m = torch.as_tensor(ctx.mask(frames).reshape(1, -1), dtype=torch.float32, device=self.device)
-            ptb = PerturbationLpNorm(norm=np.inf, x_L=x0 - eps * m, x_U=x0 + eps * m)
-            _, ub = bm.compute_bounds(x=(BoundedTensor(x0, ptb),), method=self.method,
-                                      bound_lower=False, bound_upper=True)
+            old = torch.get_default_dtype()
+            torch.set_default_dtype(self.dtype)          # auto_LiRPA makes internal tensors in the default dtype
+            try:
+                bm = self._bounded(ctx, w, frames)
+                z0 = torch.as_tensor(ctx.windows[w][list(frames)].reshape(1, -1), dtype=self.dtype,
+                                     device=self.device)
+                ptb = PerturbationLpNorm(norm=np.inf, x_L=z0 - eps, x_U=z0 + eps)
+                _, ub = bm.compute_bounds(x=(BoundedTensor(z0, ptb),), method=self.method,
+                                          bound_lower=False, bound_upper=True)
+                if self.method == "CROWN-Optimized":
+                    # alpha-CROWN's first iterate need not reproduce CROWN exactly; both bounds are
+                    # sound, so report the better one (as alpha-beta-CROWN does); time is counted
+                    _, ub0 = bm.compute_bounds(x=(BoundedTensor(z0, ptb),), method="CROWN",
+                                               bound_lower=False, bound_upper=True)
+                    ub = torch.minimum(ub, ub0)
+            finally:
+                torch.set_default_dtype(old)
             ub = float(ub.max().item())
-            return ("verified" if ub <= ctx.tau else "unknown"), ub, {}
+            return ("verified" if ub <= ctx.tau else "unknown"), ub, {"dtype": str(self.dtype)}
         return _guard(run, self.budget)
 
 
 # --------------------------------------------------------------------------- #
 # alpha-beta-CROWN + GenBaB (one subprocess per query)
 # --------------------------------------------------------------------------- #
-class _FixedScore(torch.nn.Module):
-    """Score graph whose input is ONLY the attacked readings (B, k*D); the other
-    seconds enter as constants through a selector matmul (batch-safe)."""
-
-    def __init__(self, g: ScoreGraph, anchor: np.ndarray, frames):
-        super().__init__()
-        self.g = g
-        T, D = anchor.shape
-        idx = [t * D + d for t in frames for d in range(D)]
-        sel = np.zeros((len(idx), T * D), dtype=np.float32)
-        sel[np.arange(len(idx)), idx] = 1.0
-        base = anchor.astype(np.float32).ravel().copy()
-        base[idx] = 0.0
-        self.register_buffer("sel", torch.as_tensor(sel))
-        self.register_buffer("base", torch.as_tensor(base).unsqueeze(0))
-
-    def forward(self, z):
-        return self.g(z @ self.sel + self.base)
-
-
 class ABCrown:
     """Each query: export ONNX (score folded in) + VNN-LIB spec 'score >= tau'
     (the violation); alpha-beta-CROWN answers unsat (= verified), sat
@@ -179,15 +178,15 @@ class ABCrown:
 
     def __init__(self, name, cfg, device):
         self.name, self.budget, self.device = name, cfg["budget"], device
-        self.encoding = cfg.get("encoding", "fixed")
+        self.encoding = cfg.get("encoding", "attacked")
         self.abc_dir = Path(os.environ.get("ABCROWN_DIR", HERE / "third_party" / "alpha-beta-CROWN"))
         self.config = HERE / "abcrown.yaml"
 
     def _files(self, ctx, w, frames, eps, tmp: Path):
         x = ctx.windows[w]
         g = ctx.graph("cpu")
-        if self.encoding == "fixed":
-            net = _FixedScore(g, x, frames).eval()
+        if self.encoding == "attacked":
+            net = AttackScore(g, x, frames).eval()
             center = x[list(frames)].ravel()
             lo, hi = center - eps, center + eps
         else:

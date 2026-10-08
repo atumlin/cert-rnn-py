@@ -104,6 +104,90 @@ class ScoreGraph(nn.Module):
         return (d * d).flatten(1).mean(dim=1, keepdim=True)
 
 
+class AttackScore(nn.Module):
+    """The same score as a function of the ATTACKED readings only (B, k*D).
+
+    * Every other reading, and the zero initial state, is a constant buffer, so
+      bounding tools treat it as exact. (Zero-width perturbed inputs instead
+      leave float-rounding widths that alpha-CROWN's sigmoid/tanh relaxations
+      blow up to ~1e20.)
+    * Only MatMul / Add / Mul / Sigmoid / Tanh on buffers: no Slice, ReduceSum
+      or scalar Div, whose scalar constants alpha-beta-CROWN's GenBaB (BBPS)
+      branching heuristic does not accept.
+    * Constant (1, .) and batched (B, .) terms are combined by broadcasting with
+      the batched term first (onnx2pytorch adds in place).
+    """
+
+    def __init__(self, g: ScoreGraph, anchor: np.ndarray, frames):
+        super().__init__()
+        self.T, self.D, self.H, self.frames = g.T, g.D, g.H, sorted(frames)
+        dtype, H, D = g.head_W.dtype, g.H, g.D
+        reg = lambda n, v: self.register_buffer(n, torch.as_tensor(np.asarray(v), dtype=dtype))
+        anchor = np.asarray(anchor).reshape(g.T, D)
+        k = len(self.frames)
+        for j in range(k):                          # z @ sel_j = attacked reading j
+            sel = np.zeros((k * D, D)); sel[j * D:(j + 1) * D] = np.eye(D)
+            reg(f"sel{j}", sel)
+        for t in range(g.T):
+            reg(f"anchor{t}", anchor[t:t + 1])
+        reg("zero_H", np.zeros((1, H)))
+        reg("ones_D", np.ones((D, 1)))
+        reg("inv_TD", np.full((1, 1), 1.0 / (g.T * D)))
+        reg("head_WT", g.head_W.detach().cpu().numpy().T)
+        reg("head_b", g.head_b.detach().cpu().numpy().reshape(-1))
+        self._layers = {}
+        for tag, layers in (("enc", g._enc), ("dec", g._dec)):
+            names = []
+            for i, n in enumerate(layers):
+                W_in = getattr(g, n["W_in"]).detach().cpu().numpy()
+                W_rec = getattr(g, n["W_rec"]).detach().cpu().numpy()
+                bias = getattr(g, n["b"]).detach().cpu().numpy().reshape(-1)
+                row = {}
+                for q, gate in enumerate("ifgo"):     # PyTorch gate order i, f, g, o
+                    rows = slice(q * H, (q + 1) * H)
+                    for kind, val in (("Wx", W_in[rows].T), ("Wh", W_rec[rows].T), ("b", bias[rows])):
+                        nm = f"{tag}{i}_{gate}_{kind}"
+                        reg(nm, val)
+                        row[gate, kind] = nm
+                names.append(row)
+            self._layers[tag] = names
+
+    @staticmethod
+    def _add(a, b, a_batched):
+        return a + b if a_batched else b + a
+
+    def _step(self, x_t, h, c, tag, x_batched, state_batched):
+        inp, batched = x_t, x_batched
+        for i, row in enumerate(self._layers[tag]):
+            B = lambda gate, kind: getattr(self, row[gate, kind])
+            pre = {q: self._add(inp @ B(q, "Wx"), h[i] @ B(q, "Wh"), batched) + B(q, "b") for q in "ifgo"}
+            ig, fg = torch.sigmoid(pre["i"]), torch.sigmoid(pre["f"])
+            gg, og = torch.tanh(pre["g"]), torch.sigmoid(pre["o"])
+            out_b = batched or state_batched
+            c[i] = self._add(ig * gg, fg * c[i], out_b)
+            h[i] = og * torch.tanh(c[i])
+            inp, batched = h[i], out_b
+        return inp, batched
+
+    def forward(self, z):
+        L_enc, L_dec = len(self._layers["enc"]), len(self._layers["dec"])
+        he, ce = [self.zero_H] * L_enc, [self.zero_H] * L_enc
+        hd, cd = [self.zero_H] * L_dec, [self.zero_H] * L_dec
+        total, state_batched = None, False      # state becomes batched at the first attacked second
+        for t in range(self.T):
+            if t in self.frames:
+                x_t, xb = z @ getattr(self, f"sel{self.frames.index(t)}"), True
+            else:
+                x_t, xb = getattr(self, f"anchor{t}"), False
+            code, enc_b = self._step(x_t, he, ce, "enc", xb, state_batched)
+            top, _ = self._step(code, hd, cd, "dec", enc_b, state_batched)
+            d = (top @ self.head_WT + self.head_b) - x_t
+            err = (d * d) @ self.ones_D
+            state_batched = enc_b
+            total = err if total is None else self._add(err, total, enc_b)
+        return total * self.inv_TD
+
+
 def window_scores(model: V3AE, X: np.ndarray, batch: int = 1024) -> np.ndarray:
     model.eval()
     with torch.no_grad():

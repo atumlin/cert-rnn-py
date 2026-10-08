@@ -4,6 +4,7 @@
 # multiplication nodes of the unrolled LSTM.
 general:
   conv_mode: matrix
+  double_fp: true             # float64, as for the other tools (float32 alpha optimisation is unreliable here)
   verify_onnxruntime_output: true
 attack:
   pgd_order: before          # alpha-beta-CROWN's own falsifier first
@@ -14,6 +15,7 @@ solver:
   min_batch_size_ratio: 0.0
   alpha-crown:
     iteration: 100
+    alpha_dtype: auto          # keep alphas in float64 during BaB (default float16)
   beta-crown:
     iteration: 30
 bab:
