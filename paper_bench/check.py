@@ -11,7 +11,8 @@ Order per (tool, window, attack): eps from largest to smallest.
     sound tool can verify it -> FALSIFIED, filled in for every verifier
     without running it (marked implied="pgd").
   * verified at eps => verified at every smaller eps (the smaller box lies
-    inside the larger one) -> filled in, marked implied="larger_eps".
+    inside the larger one) -> filled in, marked implied="larger_eps" -- only when
+    protocol.infer_smaller_eps is true (off by default, so every query is timed).
 Results: results/<hardware>/check.jsonl. PGD counterexample inputs are data
 and go to work/cex/ (never to results/).
 """
@@ -49,7 +50,7 @@ def tool_order(cfg, bench, wanted):
     return sorted(names, key=lambda n: (not cfg["tools"][n].get("attack"), bool(cfg["tools"][n].get("slow"))))
 
 
-def run_group(tool, ctx, bench, seed, w, attack, eps_list, falsified, done, hardware, cex_dir):
+def run_group(tool, ctx, bench, seed, w, attack, eps_list, falsified, done, hardware, cex_dir, infer=True):
     """All eps for one (tool, window, attack), largest first. Returns new records."""
     frames = attack_frames(attack, ctx.T)
     out, verified_at = [], None
@@ -63,7 +64,7 @@ def run_group(tool, ctx, bench, seed, w, attack, eps_list, falsified, done, hard
                    eps=eps, tau=ctx.tau, hardware=hardware, device=tool.device, implied=None)
         if not hasattr(tool, "attack") and (w, attack, eps) in falsified:
             rec.update(status="falsified", implied="pgd", ub=None, wall=0.0, cpu=0.0)
-        elif verified_at is not None:
+        elif infer and verified_at is not None:
             rec.update(status="verified", implied="larger_eps", ub=None, wall=0.0, cpu=0.0)
         else:
             v = tool.check(ctx, w, frames, eps)
@@ -135,9 +136,12 @@ def main():
             print(f"[{bench}/seed{seed}] {name}: {len(groups)} (window, attack) groups to run", flush=True)
             txt.note(f"{bench}/seed{seed} {name}: {len(groups)} (window, attack) groups to run")
             t0, n = time.perf_counter(), 0
-            jobs = [(bench, seed, w, a, eps_list, falsified, done, args.hardware, cex_dir) for w, a in groups]
+            infer = cfg["protocol"].get("infer_smaller_eps", True)
+            jobs = [(bench, seed, w, a, eps_list, falsified, done, args.hardware, cex_dir, infer) for w, a in groups]
             # CPU tools (zonotopes, CPU auto_LiRPA) run as a pool of single-threaded workers
-            if tcfg["kind"] in ("certrnn", "lirpa") and tcfg.get("device") == "cpu" and workers > 1:
+            pooled = (tcfg["kind"] in ("certrnn", "lirpa") and tcfg.get("device") == "cpu") or \
+                     (tcfg["kind"] == "abcrown" and tcfg.get("max_workers", 1) > 1)   # abcrown: subprocesses
+            if pooled and workers > 1:
                 single_thread_env()
                 # spawn, not fork: the parent already started torch thread pools / CUDA (PGD),
                 # and forked children can deadlock on locks held at fork time

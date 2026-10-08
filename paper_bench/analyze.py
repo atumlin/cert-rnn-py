@@ -11,7 +11,9 @@ Outputs
   check_main.csv/.tex     per benchmark x tool x attack family: % verified at each eps,
                           median seconds per query, timeouts/errors
   certified_rate.pdf      % verified vs eps (one panel per attack family)
-  cactus.pdf              queries verified vs time budget (log time)
+  trajectory.pdf/.csv     % of queries verified within t s per query, per model + pooled
+  verified_by_cutoff.csv  verified per model x tool at each report cutoff (300 s, 1800 s)
+  *_<c>s.*                check_main / paired_check / certified_rate at each cutoff
   radius.csv/.tex         certified radius per tool x attack: min / median, time; PGD upper bound
   paired_check.csv        Cert-RNN+ vs each verifier on identical fixed-eps queries
   paired.csv              (radius) Cert-RNN+ vs each tool on identical (window, attack): wins/ties/losses
@@ -58,7 +60,7 @@ def detection(cfg, out):
     return df
 
 
-def check_tables(cfg, out, recs):
+def check_tables(cfg, out, recs, sfx=""):
     df = pd.DataFrame(recs)
     if df.empty:
         return df
@@ -77,12 +79,12 @@ def check_tables(cfg, out, recs):
         row["queries"] = len(g)
         rows.append(row)
     tab = pd.DataFrame(rows)
-    tab.to_csv(out / "check_main.csv", index=False)
-    _tex(tab, out / "check_main.tex", "Fixed-$\\epsilon$ verification: share of queries verified and time per query.")
+    tab.to_csv(out / f"check_main{sfx}.csv", index=False)
+    _tex(tab, out / f"check_main{sfx}.tex", "Fixed-$\\epsilon$ verification: share of queries verified and time per query.")
     return df
 
 
-def paired_check(out, df):
+def paired_check(out, df, sfx=""):
     """Cert-RNN+ vs each verifier on identical queries (benchmark, seed, window, attack, eps)."""
     if df.empty or "certrnn_plus" not in set(df.tool):
         return
@@ -99,10 +101,10 @@ def paired_check(out, df):
                          "only Cert-RNN+": int((q.certrnn_plus & ~q[t]).sum()),
                          f"only other": int((~q.certrnn_plus & q[t]).sum()),
                          "neither": int((~q.certrnn_plus & ~q[t]).sum())})
-    pd.DataFrame(rows).to_csv(out / "paired_check.csv", index=False)
+    pd.DataFrame(rows).to_csv(out / f"paired_check{sfx}.csv", index=False)
 
 
-def figures(df, out, bench="grid9"):
+def figures(df, out, bench="grid9", sfx=""):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -123,17 +125,87 @@ def figures(df, out, bench="grid9"):
         ax.set(xscale="log", xlabel=r"$\epsilon$", title=f"{bench}: {f} FDI")
     axs[0][0].set_ylabel("% queries verified")
     axs[0][-1].legend(fontsize=7, loc="lower left")
-    fig.tight_layout(); fig.savefig(out / "certified_rate.pdf"); plt.close(fig)
+    fig.tight_layout(); fig.savefig(out / f"certified_rate{sfx}.pdf"); plt.close(fig)
 
-    ran = df[df["implied"].isna() & (df.tool != "pgd")]
-    fig, ax = plt.subplots(figsize=(5.5, 3.5))
-    for t in tools:
-        w = np.sort(ran[(ran.tool == t) & (ran.status == "verified")]["wall"].to_numpy())
-        if len(w):
-            ax.step(np.maximum(w, 1e-3), np.arange(1, len(w) + 1), where="post", label=LABEL[t])
-    ax.set(xscale="log", xlabel="time per query (s)", ylabel="queries verified", title=f"Cactus plot ({bench})")
-    ax.legend(fontsize=7)
-    fig.tight_layout(); fig.savefig(out / "cactus.pdf"); plt.close(fig)
+
+
+def at_cutoff(recs, cutoff):
+    """Verdicts under a per-query time limit `cutoff` <= the run's limit: a query verified
+    after `cutoff` seconds counts as a timeout. (One run at the largest limit gives all.)"""
+    out = []
+    for r in recs:
+        if r.get("status") == "verified" and not r.get("implied") and r.get("wall", 0) > cutoff:
+            r = {**r, "status": "timeout", "wall": float(cutoff)}
+        out.append(r)
+    return out
+
+
+def verified_by_cutoff(cfg, out, recs, cutoffs):
+    """Verified queries per model x tool at each time limit, with the PGD limit."""
+    df = pd.DataFrame(recs)
+    if df.empty:
+        return
+    rows = []
+    for (b, s), g in df.groupby(["bench", "seed"]):
+        pg = g[g.tool == "pgd"]
+        row = {"benchmark": b, "seed": s, "queries": len(pg),
+               "max verifiable": int(len(pg) - (pg.status == "falsified").sum())}
+        for t in [t for t in LABEL if t != "pgd" and t in set(g.tool)]:
+            gt = g[g.tool == t]
+            for c in cutoffs:
+                v = gt[(gt.status == "verified") & (gt.implied.isna() & (gt.wall <= c) | gt.implied.notna())]
+                row[f"{LABEL[t]} @{c}s"] = int(len(v))
+        rows.append(row)
+    pd.DataFrame(rows).to_csv(out / "verified_by_cutoff.csv", index=False)
+
+
+def trajectory(cfg, out, recs, cutoffs):
+    """Share of queries verified within t seconds per query (x: t, log scale; y: %),
+    one panel per model plus a pooled panel; PGD limit dashed; report cutoffs marked."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    df = pd.DataFrame(recs)
+    if df.empty:
+        return
+    if (df.implied == "larger_eps").any():
+        print("trajectory: some verdicts were inferred (no time) -- rerun with infer_smaller_eps: false")
+    tmax = max(cutoffs)
+    ts = np.logspace(-2, np.log10(tmax), 300)
+    benches = [b for b in cfg["benchmarks"] if b in set(df.bench)] + ["all models"]
+    n = len(benches)
+    ncol = min(4, n)
+    fig, axs = plt.subplots((n + ncol - 1) // ncol, ncol, figsize=(4.0 * ncol, 3.1 * ((n + ncol - 1) // ncol)),
+                            squeeze=False, sharey=True)
+    rows = []
+    for ax, b in zip(axs.flat, benches):
+        g = df if b == "all models" else df[df.bench == b]
+        for t in [t for t in LABEL if t != "pgd" and t in set(g.tool)]:
+            gt = g[g.tool == t]
+            if b == "all models":                       # pooled: only the models this tool ran on
+                gt = gt[gt.bench.isin(set(gt.bench))]
+            N = len(gt)
+            w = gt[(gt.status == "verified")]["wall"].where(gt.implied.isna(), 0.0).to_numpy()
+            y = [100.0 * (w <= x).sum() / N for x in ts]
+            ax.plot(ts, y, label=LABEL[t] + ("" if b != "all models" else f" ({gt.bench.nunique()} models)"),
+                    lw=2.2 if t == "certrnn_plus" else 1.4)
+            for c in cutoffs:
+                rows.append({"benchmark": b, "tool": LABEL[t], "cutoff_s": c, "queries": N,
+                             "% verified": round(100.0 * (w <= c).sum() / N, 1)})
+        pg = g[g.tool == "pgd"]
+        if len(pg):
+            ax.axhline(100.0 * (1 - (pg.status == "falsified").mean()), color="k", ls="--", lw=1)
+        for c in cutoffs[:-1]:
+            ax.axvline(c, color="0.6", ls=":", lw=1)
+        ax.set(xscale="log", xlim=(1e-2, tmax), ylim=(0, 100), title=b, xlabel="time per query (s)")
+    for ax in axs.flat[len(benches):]:
+        ax.axis("off")
+    for r in range(axs.shape[0]):
+        axs[r][0].set_ylabel("% queries verified")
+    axs.flat[len(benches) - 1].legend(fontsize=6.5, loc="lower right")
+    fig.suptitle("Verified within t seconds per query (dashed: PGD limit; dotted: report cutoff)", fontsize=9)
+    fig.tight_layout(); fig.savefig(out / "trajectory.pdf"); plt.close(fig)
+    pd.DataFrame(rows).to_csv(out / "trajectory.csv", index=False)
 
 
 def radius_tables(out, recs):
@@ -222,9 +294,15 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     keep = (lambda r: True) if args.seeds is None else (lambda r: r.get("seed") in args.seeds)
     detection(cfg, out)
-    df = check_tables(cfg, out, [r for r in ResultLog(src / "check.jsonl").records() if keep(r)])
-    paired_check(out, df)
-    figures(df, out)
+    recs = [r for r in ResultLog(src / "check.jsonl").records() if keep(r)]
+    cutoffs = sorted(cfg["protocol"].get("report_cutoffs", [max(t["budget"] for t in cfg["tools"].values())]))
+    for c in cutoffs:                                   # every table/figure at each time limit
+        dc = check_tables(cfg, out, at_cutoff(recs, c), sfx=f"_{c}s")
+        paired_check(out, dc, sfx=f"_{c}s")
+        figures(dc, out, sfx=f"_{c}s")
+    verified_by_cutoff(cfg, out, recs, cutoffs)
+    trajectory(cfg, out, recs, cutoffs)
+    df = check_tables(cfg, out, recs)                   # uncut (largest limit), for scaling / soundness
     radius_tables(out, [r for r in ResultLog(src / "radius.jsonl").records() if keep(r)])
     scaling(cfg, out, df)
     soundness(out, df)

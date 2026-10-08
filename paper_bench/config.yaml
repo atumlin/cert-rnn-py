@@ -31,14 +31,16 @@ protocol:
   eps: [0.0005, 0.001, 0.003, 0.01]
   attacks: [persistent, burst, transient_first, transient_middle, transient_last]
   radius: {eps_init: 0.5, n_iters: 12}
+  infer_smaller_eps: false   # run every query (each needs its own time for the trajectory figure)
+  report_cutoffs: [300, 1800]  # verified counts are reported at each per-query time limit (one run at the largest)
 
-tools:                    # budget = per-query wall-clock seconds; auto_LiRPA tools run in float64
-  certrnn:      {kind: certrnn, gates: box,  score: componentwise, device: cpu,  budget: 300}
-  certrnn_plus: {kind: certrnn, gates: zono, score: joint,         device: cpu,  budget: 300}
-  ibp:          {kind: lirpa,   method: IBP,             device: cpu,  budget: 300}
-  crown:        {kind: lirpa,   method: CROWN,           device: cpu,  budget: 300}  # CPU faster than GPU at these sizes (measured)
-  alpha_crown:  {kind: lirpa,   method: CROWN-Optimized, device: cpu,  budget: 3600, slow: true, max_workers: 5}  # faster on 1 CPU thread than GPU (fp64); ~7.5 GB RAM per worker
-  abcrown:      {kind: abcrown,                          device: cpu,  budget: 1800, slow: true, threads: 8}  # GPU gave no speedup (fp64)
+tools:                    # budget = per-query wall-clock limit (same for every verifier); auto_LiRPA tools run in float64
+  certrnn:      {kind: certrnn, gates: box,  score: componentwise, device: cpu,  budget: 1800}
+  certrnn_plus: {kind: certrnn, gates: zono, score: joint,         device: cpu,  budget: 1800}
+  ibp:          {kind: lirpa,   method: IBP,             device: cpu,  budget: 1800}
+  crown:        {kind: lirpa,   method: CROWN,           device: cpu,  budget: 1800}  # CPU faster than GPU at these sizes (measured)
+  alpha_crown:  {kind: lirpa,   method: CROWN-Optimized, device: cpu,  budget: 1800, slow: true, max_workers: 5}  # faster on 1 CPU thread than GPU (fp64); ~7.5 GB RAM per worker
+  abcrown:      {kind: abcrown,                          device: cpu,  budget: 1800, slow: true, threads: 8, max_workers: 3}  # GPU gave no speedup (fp64)
   pgd:          {kind: pgd, restarts: 10, steps: 100,    device: cuda, budget: 300, attack: true}
 
 hardware:
