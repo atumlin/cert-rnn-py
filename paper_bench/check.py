@@ -131,11 +131,12 @@ def main():
             print(f"[{bench}/seed{seed}] {name}: {len(groups)} (window, attack) groups to run", flush=True)
             t0, n = time.perf_counter(), 0
             jobs = [(bench, seed, w, a, eps_list, falsified, done, args.hardware, cex_dir) for w, a in groups]
-            if tcfg["kind"] == "certrnn" and workers > 1:
+            # CPU tools (zonotopes, CPU auto_LiRPA) run as a pool of single-threaded workers
+            if tcfg["kind"] in ("certrnn", "lirpa") and tcfg.get("device") == "cpu" and workers > 1:
                 single_thread_env()
                 # spawn, not fork: the parent already started torch thread pools / CUDA (PGD),
                 # and forked children can deadlock on locks held at fork time
-                with ProcessPoolExecutor(min(workers, len(jobs)), mp_context=mp.get_context("spawn"),
+                with ProcessPoolExecutor(min(workers, tcfg.get("max_workers", workers), len(jobs)), mp_context=mp.get_context("spawn"),
                                          initializer=_init_worker,
                                          initargs=(mdir, name, tcfg, args.hardware)) as ex:
                     for fut in as_completed([ex.submit(_worker, j) for j in jobs]):
