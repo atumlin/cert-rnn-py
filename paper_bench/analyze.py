@@ -172,7 +172,7 @@ def scaling(cfg, out, df):
     import matplotlib.pyplot as plt
     if df.empty:
         return
-    ran = df[df["implied"].isna() & df.status.isin(["verified", "unknown"])]
+    ran = df[df["implied"].isna() & (df.status != "error")]       # timeouts count at their (budget) time
     rows = []
     for b, g in ran.groupby("bench"):
         spec = cfg["benchmarks"].get(b, {})

@@ -16,12 +16,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 import time
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from paper_bench.check import tool_order
-from paper_bench.common import (ResultLog, single_thread_env, atomic_write_json, attack_frames, load_config, model_dir,
+from paper_bench.common import (ResultLog, RunLog, single_thread_env, atomic_write_json, attack_frames, load_config, model_dir,
                                 model_ids, results_dir, work_dir)
 
 _W: dict = {}
@@ -87,6 +88,7 @@ def main():
     from paper_bench.tools import ModelContext, make_tool
 
     log = ResultLog(results_dir(cfg) / args.hardware / "radius.jsonl")
+    txt = RunLog(cfg, args.hardware, "radius", sys.argv)
     workers = cfg["hardware"][args.hardware]["cpu_workers"]
     rcfg, attacks = cfg["protocol"]["radius"], cfg["protocol"]["attacks"]
     for bench, seed in model_ids(cfg, args.bench):
@@ -95,6 +97,7 @@ def main():
         mdir = model_dir(cfg, bench, seed)
         if not (mdir / "meta.json").exists():
             print(f"[{bench}/seed{seed}] not trained yet; skipping")
+            txt.note(f"{bench}/seed{seed}: not trained yet; skipped")
             continue
         ctx = ModelContext(mdir)
         for name in tool_order(cfg, bench, args.tools):
@@ -109,8 +112,10 @@ def main():
                     if f"{name}|{bench}|{seed}|{w}|{a}" not in done]
             if not jobs:
                 print(f"[{bench}/seed{seed}] {name}: done")
+                txt.note(f"{bench}/seed{seed} {name}: already complete")
                 continue
             print(f"[{bench}/seed{seed}] {name}: {len(jobs)} searches to run", flush=True)
+            txt.note(f"{bench}/seed{seed} {name}: {len(jobs)} searches to run")
             t0 = time.perf_counter()
             # CPU tools (zonotopes, CPU auto_LiRPA) run as a pool of single-threaded workers
             if tcfg["kind"] in ("certrnn", "lirpa") and tcfg.get("device") == "cpu" and workers > 1:
@@ -121,12 +126,18 @@ def main():
                                          initializer=_init_worker,
                                          initargs=(mdir, name, tcfg, args.hardware)) as ex:
                     for fut in as_completed([ex.submit(_worker, j) for j in jobs]):
-                        log.append(fut.result())
+                        r = fut.result(); log.append(r); txt.radius(r)
             else:
                 tool = make_tool(name, tcfg, args.hardware)
                 for j in jobs:
-                    log.append(search(tool, ctx, *j))
+                    r = search(tool, ctx, *j); log.append(r); txt.radius(r)
             print(f"[{bench}/seed{seed}] {name}: finished in {time.perf_counter() - t0:.0f}s", flush=True)
+            g = [r for r in log.records() if r["tool"] == name and r["bench"] == bench and r["seed"] == seed]
+            rad = sorted(r["radius"] for r in g if r.get("radius") is not None)
+            txt.note(f"---- {bench}/seed{seed} {name}: {len(g)} searches | median radius "
+                     f"{rad[len(rad) // 2] if rad else 'n/a'} | min {rad[0] if rad else 'n/a'} | "
+                     f"probe timeouts {sum(r['n_timeout'] for r in g)} | total {sum(r['wall'] for r in g):.0f}s")
+    txt.close()
 
 
 if __name__ == "__main__":

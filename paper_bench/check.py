@@ -20,13 +20,14 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 import time
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import numpy as np
 
-from paper_bench.common import (ResultLog, single_thread_env, attack_frames, load_config, model_dir, model_ids,
+from paper_bench.common import (ResultLog, RunLog, single_thread_env, attack_frames, load_config, model_dir, model_ids,
                                 results_dir, work_dir)
 
 _W: dict = {}      # per-worker state (process pool)
@@ -104,6 +105,7 @@ def main():
     from paper_bench.tools import ModelContext, make_tool
 
     log = ResultLog(results_dir(cfg) / args.hardware / "check.jsonl")
+    txt = RunLog(cfg, args.hardware, "check", sys.argv)
     workers = cfg["hardware"][args.hardware]["cpu_workers"]
     eps_list, attacks = cfg["protocol"]["eps"], cfg["protocol"]["attacks"]
     for bench, seed in model_ids(cfg, args.bench):
@@ -112,6 +114,7 @@ def main():
         mdir = model_dir(cfg, bench, seed)
         if not (mdir / "meta.json").exists():
             print(f"[{bench}/seed{seed}] not trained yet -- run train first; skipping")
+            txt.note(f"{bench}/seed{seed}: not trained yet; skipped")
             continue
         ctx = ModelContext(mdir)
         cex_dir = work_dir(cfg) / "cex" / args.hardware / f"{bench}_seed{seed}"
@@ -127,8 +130,10 @@ def main():
                       if any(key(name, bench, seed, w, a, e) not in done for e in eps_list)]
             if not groups:
                 print(f"[{bench}/seed{seed}] {name}: done")
+                txt.note(f"{bench}/seed{seed} {name}: already complete")
                 continue
             print(f"[{bench}/seed{seed}] {name}: {len(groups)} (window, attack) groups to run", flush=True)
+            txt.note(f"{bench}/seed{seed} {name}: {len(groups)} (window, attack) groups to run")
             t0, n = time.perf_counter(), 0
             jobs = [(bench, seed, w, a, eps_list, falsified, done, args.hardware, cex_dir) for w, a in groups]
             # CPU tools (zonotopes, CPU auto_LiRPA) run as a pool of single-threaded workers
@@ -141,13 +146,41 @@ def main():
                                          initargs=(mdir, name, tcfg, args.hardware)) as ex:
                     for fut in as_completed([ex.submit(_worker, j) for j in jobs]):
                         for r in fut.result():
-                            log.append(r); n += 1
+                            log.append(r); txt.check(r); n += 1
             else:
                 tool = make_tool(name, tcfg, args.hardware)
                 for j in jobs:
                     for r in run_group(tool, ctx, *j):
-                        log.append(r); n += 1
+                        log.append(r); txt.check(r); n += 1
             print(f"[{bench}/seed{seed}] {name}: {n} queries recorded in {time.perf_counter() - t0:.0f}s", flush=True)
+            txt.summary(f"{bench}/seed{seed} {name} (all records so far)",
+                        [r for r in log.records() if r["tool"] == name and r["bench"] == bench and r["seed"] == seed])
+    final_tables(txt, log.records(), cfg, args)
+    txt.close()
+
+
+def final_tables(txt, recs, cfg, args):
+    """Verified count per model x tool (with the PGD limit), and a soundness check."""
+    tools = [n for n in cfg["tools"] if n != "pgd"]
+    models = sorted({(r["bench"], r["seed"]) for r in recs
+                     if (args.bench is None or r["bench"] in args.bench) and (args.seeds is None or r["seed"] in args.seeds)},
+                    key=lambda m: (list(cfg["benchmarks"]).index(m[0]) if m[0] in cfg["benchmarks"] else 99, m[1]))
+    rows = {}
+    for b, s in models:
+        g = [r for r in recs if r["bench"] == b and r["seed"] == s]
+        n_pgd = sum(r["tool"] == "pgd" for r in g)
+        row = {"max verifiable": f"{n_pgd - sum(r['tool'] == 'pgd' and r['status'] == 'falsified' for r in g)}/{n_pgd}"}
+        for t in tools:
+            gt = [r for r in g if r["tool"] == t]
+            if gt:
+                row[t] = f"{sum(r['status'] == 'verified' for r in gt)}/{len(gt)}"
+        rows[f"{b}/seed{s}"] = row
+    txt.table("verified queries (all records so far)", rows, ["max verifiable"] + tools)
+    fals = {r["key"].split("|", 1)[1] for r in recs if r["tool"] == "pgd" and r["status"] == "falsified"}
+    ver = [r for r in recs if r["tool"] != "pgd" and r["status"] == "verified"]
+    bad = [r["key"] for r in ver if r["key"].split("|", 1)[1] in fals]
+    txt.note(f"soundness: {len(bad)} of {len(ver)} verified verdicts contradicted by a PGD counterexample"
+             + (f"  <-- CHECK: {bad[:5]}" if bad else ""))
 
 
 if __name__ == "__main__":
