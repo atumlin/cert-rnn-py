@@ -2,7 +2,9 @@
 partial results). Writes to results/<hardware>/: CSV + LaTeX tables and PDF
 figures. Only numbers -- no data, models or counterexample inputs.
 
-    python -m paper_bench.analyze [--hardware recommended] [--quick]
+    python -m paper_bench.analyze [--hardware recommended] [--quick] [--seeds 0]
+
+With --seeds, outputs go to results/<hardware>/seeds_<k>/.
 
 Outputs
   detection.csv/.tex      per model: tau, ROC-AUC, F1, recall, false-alarm rate
@@ -11,7 +13,8 @@ Outputs
   certified_rate.pdf      % verified vs eps (one panel per attack family)
   cactus.pdf              queries verified vs time budget (log time)
   radius.csv/.tex         certified radius per tool x attack: min / median, time; PGD upper bound
-  paired.csv              Cert-RNN+ vs each tool on identical (window, attack): wins/ties/losses
+  paired_check.csv        Cert-RNN+ vs each verifier on identical fixed-eps queries
+  paired.csv              (radius) Cert-RNN+ vs each tool on identical (window, attack): wins/ties/losses
   scaling.csv/.pdf        median seconds per query vs model size (features, window, depth)
   soundness.csv           verified verdicts contradicted by a real counterexample (should be 0)
 """
@@ -79,10 +82,31 @@ def check_tables(cfg, out, recs):
     return df
 
 
-def figures(df, out):
+def paired_check(out, df):
+    """Cert-RNN+ vs each verifier on identical queries (benchmark, seed, window, attack, eps)."""
+    if df.empty or "certrnn_plus" not in set(df.tool):
+        return
+    key = ["bench", "seed", "window", "attack", "eps"]
+    v = df[df.tool != "pgd"].assign(ok=lambda d: d.status == "verified").pivot_table(
+        index=key, columns="tool", values="ok", aggfunc="first")
+    rows = []
+    for t in [t for t in LABEL if t in v.columns and t not in ("certrnn_plus", "pgd")]:
+        p = v[["certrnn_plus", t]].dropna().astype(bool)
+        for b in sorted(set(p.index.get_level_values("bench"))):
+            q = p.xs(b, level="bench")
+            rows.append({"benchmark": b, "vs": LABEL[t], "queries": len(q),
+                         "both verified": int((q.certrnn_plus & q[t]).sum()),
+                         "only Cert-RNN+": int((q.certrnn_plus & ~q[t]).sum()),
+                         f"only other": int((~q.certrnn_plus & q[t]).sum()),
+                         "neither": int((~q.certrnn_plus & ~q[t]).sum())})
+    pd.DataFrame(rows).to_csv(out / "paired_check.csv", index=False)
+
+
+def figures(df, out, bench="grid9"):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    df = df[df.bench == bench] if len(df) else df          # one model family per figure (no pooling)
     if df.empty:
         return
     tools = [t for t in LABEL if t in set(df.tool) and t != "pgd"]
@@ -96,7 +120,7 @@ def figures(df, out):
         p = g[g.tool == "pgd"].groupby("eps")["status"].apply(lambda x: 100 * (1 - (x == "falsified").mean()))
         if len(p):
             ax.plot(p.index, p.values, "k--", lw=1, label="upper limit (1 - PGD falsified)")
-        ax.set(xscale="log", xlabel=r"$\epsilon$", title=f"{f} FDI")
+        ax.set(xscale="log", xlabel=r"$\epsilon$", title=f"{bench}: {f} FDI")
     axs[0][0].set_ylabel("% queries verified")
     axs[0][-1].legend(fontsize=7, loc="lower left")
     fig.tight_layout(); fig.savefig(out / "certified_rate.pdf"); plt.close(fig)
@@ -107,7 +131,7 @@ def figures(df, out):
         w = np.sort(ran[(ran.tool == t) & (ran.status == "verified")]["wall"].to_numpy())
         if len(w):
             ax.step(np.maximum(w, 1e-3), np.arange(1, len(w) + 1), where="post", label=LABEL[t])
-    ax.set(xscale="log", xlabel="time per query (s)", ylabel="queries verified", title="Cactus plot")
+    ax.set(xscale="log", xlabel="time per query (s)", ylabel="queries verified", title=f"Cactus plot ({bench})")
     ax.legend(fontsize=7)
     fig.tight_layout(); fig.savefig(out / "cactus.pdf"); plt.close(fig)
 
@@ -189,14 +213,19 @@ def main():
     ap.add_argument("--hardware", default="recommended")
     ap.add_argument("--quick", action="store_true")
     ap.add_argument("--config")
+    ap.add_argument("--seeds", nargs="*", type=int,
+                    help="only these seeds (compare every tool on the same queries)")
     args = ap.parse_args()
     cfg = load_config(args.config, args.quick)
-    out = results_dir(cfg) / args.hardware
+    src = results_dir(cfg) / args.hardware
+    out = src if args.seeds is None else src / ("seeds_" + "_".join(map(str, args.seeds)))
     out.mkdir(parents=True, exist_ok=True)
+    keep = (lambda r: True) if args.seeds is None else (lambda r: r.get("seed") in args.seeds)
     detection(cfg, out)
-    df = check_tables(cfg, out, ResultLog(out / "check.jsonl").records())
+    df = check_tables(cfg, out, [r for r in ResultLog(src / "check.jsonl").records() if keep(r)])
+    paired_check(out, df)
     figures(df, out)
-    radius_tables(out, ResultLog(out / "radius.jsonl").records())
+    radius_tables(out, [r for r in ResultLog(src / "radius.jsonl").records() if keep(r)])
     scaling(cfg, out, df)
     soundness(out, df)
     print(f"wrote tables and figures to {out}")
