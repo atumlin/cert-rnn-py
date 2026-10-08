@@ -14,7 +14,7 @@ solver:
   auto_enlarge_batch_size: true
   min_batch_size_ratio: 0.0
   alpha-crown:
-    iteration: 100
+    iteration: 20               # 100 used the whole budget on initialisation in float64, leaving no time for BaB (measured)
     alpha_dtype: auto          # keep alphas in float64 during BaB (default float16)
   beta-crown:
     iteration: 30

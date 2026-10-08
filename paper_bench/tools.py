@@ -153,14 +153,22 @@ class Lirpa:
                 z0 = torch.as_tensor(ctx.windows[w][list(frames)].reshape(1, -1), dtype=self.dtype,
                                      device=self.device)
                 ptb = PerturbationLpNorm(norm=np.inf, x_L=z0 - eps, x_U=z0 + eps)
-                _, ub = bm.compute_bounds(x=(BoundedTensor(z0, ptb),), method=self.method,
-                                          bound_lower=False, bound_upper=True)
                 if self.method == "CROWN-Optimized":
-                    # alpha-CROWN's first iterate need not reproduce CROWN exactly; both bounds are
-                    # sound, so report the better one (as alpha-beta-CROWN does); time is counted
-                    _, ub0 = bm.compute_bounds(x=(BoundedTensor(z0, ptb),), method="CROWN",
-                                               bound_lower=False, bound_upper=True)
-                    ub = torch.minimum(ub, ub0)
+                    # alpha-CROWN starts from CROWN: if CROWN already proves the query, stop (early
+                    # stop at iteration 0). Otherwise optimise, stopping as soon as the bound drops
+                    # below tau, and report the better of the two sound bounds (as alpha-beta-CROWN does).
+                    _, ub = bm.compute_bounds(x=(BoundedTensor(z0, ptb),), method="CROWN",
+                                              bound_lower=False, bound_upper=True)
+                    if float(ub.max()) > ctx.tau:
+                        from auto_LiRPA.utils import stop_criterion_min
+                        bm.set_bound_opts({"optimize_bound_args": {
+                            "stop_criterion_func": stop_criterion_min(-ctx.tau)}})   # stop when -ub > -tau
+                        _, ua = bm.compute_bounds(x=(BoundedTensor(z0, ptb),), method=self.method,
+                                                  bound_lower=False, bound_upper=True)
+                        ub = torch.minimum(ub, ua)
+                else:
+                    _, ub = bm.compute_bounds(x=(BoundedTensor(z0, ptb),), method=self.method,
+                                              bound_lower=False, bound_upper=True)
             finally:
                 torch.set_default_dtype(old)
             ub = float(ub.max().item())
@@ -178,6 +186,7 @@ class ABCrown:
 
     def __init__(self, name, cfg, device):
         self.name, self.budget, self.device = name, cfg["budget"], device
+        self.threads = int(cfg.get("threads", 1))         # fixed CPU thread count for the subprocess
         self.encoding = cfg.get("encoding", "attacked")
         self.abc_dir = Path(os.environ.get("ABCROWN_DIR", HERE / "third_party" / "alpha-beta-CROWN"))
         self.config = HERE / "abcrown.yaml"
@@ -216,6 +225,8 @@ class ABCrown:
                        "--vnnlib_path", str(spec_p), "--results_file", str(res),
                        "--device", self.device, "--timeout", str(self.budget)]
                 env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+                env.update({v: str(self.threads) for v in ("OMP_NUM_THREADS", "MKL_NUM_THREADS",
+                                                           "OPENBLAS_NUM_THREADS", "NUMBA_NUM_THREADS")})
                 p = subprocess.run(cmd, cwd=self.abc_dir / "complete_verifier", env=env, capture_output=True,
                                    text=True, timeout=self.budget + 300)
                 verdict = res.read_text().strip().split("\n")[0] if res.exists() else ""
@@ -260,6 +271,8 @@ class PGD:
             i = int(s.argmax())
             if float(s[i]) > best:
                 best, best_x = float(s[i]), x[i].detach().clone()
+                if best > ctx.tau and self._confirmed(ctx, best_x):   # early stop: real counterexample
+                    break
             grad, = torch.autograd.grad(s.sum(), x)
             with torch.no_grad():
                 x = a + torch.clamp(x + 0.25 * eps * m * grad.sign() - a, -eps, eps) * m
@@ -269,13 +282,22 @@ class PGD:
                 best, best_x = float(s.max()), x[int(s.argmax())].clone()
         return best, best_x.cpu().numpy().reshape(ctx.T, ctx.D)
 
+    @staticmethod
+    def _score64(ctx, xb):
+        """Score of a candidate input under the float64 reference (cert-rnn) model."""
+        return float(ctx.ae.score(np.asarray(xb, dtype=np.float64).reshape(1, ctx.T, ctx.D))[0])
+
+    def _confirmed(self, ctx, xb):
+        return self._score64(ctx, xb.detach().cpu().numpy()) > ctx.tau
+
     def check(self, ctx: ModelContext, w: int, frames, eps: float):
         holder = {}
 
         def run():
             best, xb = self.attack(ctx, w, frames, eps)
             holder["x"] = xb
-            return ("falsified" if best > ctx.tau else "no_violation"), best, {}
+            s64 = self._score64(ctx, xb)          # verdict from the float64 model, not the float32 search
+            return ("falsified" if s64 > ctx.tau else "no_violation"), s64, {"score32": best}
         v = _guard(run, self.budget)
         v["_x"] = holder.get("x")                         # counterexample input (kept local, not logged)
         return v
