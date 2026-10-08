@@ -35,8 +35,8 @@ protocol:
 tools:                    # budget = per-query wall-clock seconds; auto_LiRPA tools run in float64
   certrnn:      {kind: certrnn, gates: box,  score: componentwise, device: cpu,  budget: 300}
   certrnn_plus: {kind: certrnn, gates: zono, score: joint,         device: cpu,  budget: 300}
-  ibp:          {kind: lirpa,   method: IBP,             device: cuda, budget: 300}
-  crown:        {kind: lirpa,   method: CROWN,           device: cuda, budget: 300}
+  ibp:          {kind: lirpa,   method: IBP,             device: cpu,  budget: 300}
+  crown:        {kind: lirpa,   method: CROWN,           device: cpu,  budget: 300}  # CPU faster than GPU at these sizes (measured)
   alpha_crown:  {kind: lirpa,   method: CROWN-Optimized, device: cpu,  budget: 3600, slow: true, max_workers: 5}  # faster on 1 CPU thread than GPU (fp64); ~7.5 GB RAM per worker
   abcrown:      {kind: abcrown,                          device: cuda, budget: 1800, slow: true}
   pgd:          {kind: pgd, restarts: 10, steps: 100,    device: cuda, budget: 300, attack: true}
