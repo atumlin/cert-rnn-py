@@ -30,7 +30,7 @@ train:
 protocol:
   eps: [0.0005, 0.001, 0.003, 0.01]
   attacks: [persistent, burst, transient_first, transient_middle, transient_last]
-  radius: {eps_init: 0.5, n_iters: 12}
+  radius: {eps_init: 0.5, n_iters: 12, budget: 300}   # per-probe limit for every verifier (13 probes per search)
   infer_smaller_eps: false   # run every query (each needs its own time for the trajectory figure)
   report_cutoffs: [300, 1800]  # verified counts are reported at each per-query time limit (one run at the largest)
 

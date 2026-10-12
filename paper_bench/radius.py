@@ -89,6 +89,8 @@ def main():
 
     log = ResultLog(results_dir(cfg) / args.hardware / "radius.jsonl")
     txt = RunLog(cfg, args.hardware, "radius", sys.argv)
+    txt.note(f"radius search: eps_init {cfg['protocol']['radius']['eps_init']}, {cfg['protocol']['radius']['n_iters'] + 1} probes, "
+             f"per-probe limit {cfg['protocol']['radius'].get('budget', 'tool budget')} s for every verifier (overrides the budgets above)")
     workers = cfg["hardware"][args.hardware]["cpu_workers"]
     rcfg, attacks = cfg["protocol"]["radius"], cfg["protocol"]["attacks"]
     for bench, seed in model_ids(cfg, args.bench):
@@ -102,6 +104,8 @@ def main():
         ctx = ModelContext(mdir)
         for name in tool_order(cfg, bench, args.tools):
             tcfg = cfg["tools"][name]
+            if "budget" in rcfg and not tcfg.get("attack"):          # radius probes have their own limit
+                tcfg = {**tcfg, "budget": min(tcfg["budget"], rcfg["budget"])}
             if tcfg.get("slow") and seed not in rcfg.get("slow_tool_seeds", [0]):
                 continue                                   # slow tools: radius on the first seed only
             done = log.done()
@@ -118,7 +122,9 @@ def main():
             txt.note(f"{bench}/seed{seed} {name}: {len(jobs)} searches to run")
             t0 = time.perf_counter()
             # CPU tools (zonotopes, CPU auto_LiRPA) run as a pool of single-threaded workers
-            if tcfg["kind"] in ("certrnn", "lirpa") and tcfg.get("device") == "cpu" and workers > 1:
+            pooled = (tcfg["kind"] in ("certrnn", "lirpa") and tcfg.get("device") == "cpu") or \
+                     (tcfg["kind"] == "abcrown" and tcfg.get("max_workers", 1) > 1)   # abcrown: subprocesses
+            if pooled and workers > 1:
                 single_thread_env()
                 # spawn, not fork: the parent already started torch thread pools / CUDA (PGD),
                 # and forked children can deadlock on locks held at fork time
