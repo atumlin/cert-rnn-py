@@ -35,14 +35,17 @@ The real Zone-A data never leaves Sandia; neither do models, weights or countere
 
 ```bash
 cd cert-rnn-py && git pull                      # get the latest suite
-bash paper_bench/install.sh                     # once
-tmux new -s bench
+bash paper_bench/install.sh                     # once (re-run after a pull that changes dependencies)
+tmux new -s bench                               # keeps running if your SSH session drops
 paper_bench/01_make_data.sh --bench zoneA --data-dir /path/to/zoneA   # checks the three CSVs
-paper_bench/02_train.sh     --bench zoneA --data-dir /path/to/zoneA   # 3 seeds
-paper_bench/03_check.sh     --bench zoneA
-paper_bench/04_radius.sh    --bench zoneA
-paper_bench/06_analyze.sh
+paper_bench/02_train.sh     --bench zoneA --data-dir /path/to/zoneA   # 3 seeds (resumable)
+paper_bench/03_check.sh     --bench zoneA --seeds 0                   # main table, same protocol as the grid results
+paper_bench/06_analyze.sh   --seeds 0                                 # tables + figures into results/recommended/seeds_0/
 ```
+
+`03_check.sh` writes a readable log of every query to `paper_bench/results/recommended/logs/check_<date>-<time>.txt`
+(watch it with `tail -f`). Every step is resumable: after a crash or reboot, rerun the same command. The certified-radius
+step (`04_radius.sh`) and seeds 1-2 are not part of the current protocol; run them only when asked.
 
 The data folder must contain `SubFeatures_baseline3hr_zoneA.csv`, `SubFeatures_cyberphysical_0_1_zoneA.csv` and `CyPhyScenarioLabels_2Class_0_1_zoneA.csv`.
 
@@ -60,4 +63,4 @@ The data folder must contain `SubFeatures_baseline3hr_zoneA.csv`, `SubFeatures_c
 
 ## Configuration
 
-Everything (benchmarks, seeds, tools, budgets, eps values, attacks, number of windows) is in [config.yaml](config.yaml). Per-query budgets: 300 s for Cert-RNN, Cert-RNN+, IBP, CROWN and PGD; 1800 s for alpha-beta-CROWN; alpha-CROWN is set after the pilot (default 3600 s). alpha-CROWN and alpha-beta-CROWN run only on the benchmarks marked `slow_tools: true` (grid9 and zoneA).
+Everything (benchmarks, seeds, tools, budgets, eps values, attacks, number of windows) is in [config.yaml](config.yaml). Every verifier has the same per-query limit of 1800 s; results are also reported at a 300 s cutoff computed from the same run (`protocol.report_cutoffs`). Every query is run and timed individually (`protocol.infer_smaller_eps: false`). All tools run on CPU: Cert-RNN, Cert-RNN+, IBP, CROWN and alpha-CROWN with one thread per query (pool of `hardware.recommended.cpu_workers` workers; alpha-CROWN capped at `max_workers: 5`, about 7.5 GB RAM each), alpha-beta-CROWN with 8 threads per query, 3 queries at a time. alpha-CROWN and alpha-beta-CROWN run only on the benchmarks marked `slow_tools: true` (grid9 and zoneA). On a machine with fewer than 28 cores or less than about 64 GB RAM, lower `cpu_workers`, alpha-CROWN `max_workers` and alpha-beta-CROWN `max_workers` in config.yaml before running.
